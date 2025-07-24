@@ -69,11 +69,57 @@ def init_args():
 #     except ffmpeg.Error as e:
 #         print("변환 중 오류 발생:", e)
 
+def analyze_flash_sc231(video_path, start_time):
+    """
+    Analyze video for flashes according to SC 2.3.1 guidelines.
+    Checks for luminance contrast changes and red flashes.
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"Error: Cannot open video file {video_path}")
+        return
+
+    prev_frame = None
+    flash_detected = False
+    frame_count = 0
+    flash_threshold = 0.4  # example threshold for luminance contrast change
+    red_flash_threshold = 0.3  # example threshold for red flash intensity
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame_count += 1
+        # Convert frame to grayscale for luminance
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        if prev_frame is not None:
+            # Calculate luminance contrast change
+            diff = cv2.absdiff(gray, prev_frame)
+            mean_diff = np.mean(diff) / 255.0  # normalize
+
+            # Check for red flashes
+            red_channel = frame[:, :, 2].astype(np.float32) / 255.0
+            green_channel = frame[:, :, 1].astype(np.float32) / 255.0
+            blue_channel = frame[:, :, 0].astype(np.float32) / 255.0
+
+            red_flash = np.mean(red_channel - np.maximum(green_channel, blue_channel))
+
+            if mean_diff > flash_threshold or red_flash > red_flash_threshold:
+                flash_detected = True
+                print(f"Flash detected at frame {frame_count} - luminance change: {mean_diff:.3f}, red flash: {red_flash:.3f}")
+
+        prev_frame = gray
+
+    cap.release()
+
+    if flash_detected:
+        print("Result: Video fails SC 2.3.1 flash guidelines.")
+    else:
+        print("Result: Video passes SC 2.3.1 flash guidelines.")
+
 if __name__ == "__main__":
-    # convert_mp4_to_avi('/Users/sonjeongmin/Desktop/proj/vidoeo_ax_proto/temp/Galaxy Watch6 ｜ Watch6 Classic： How to monitor your heart rate & heart rhythm ｜ Samsung​.mp4', './temp/test_10_1.avi')
-    # parser = init_args()
-    # args = parser.parse_args()
-    # main(args)
     start_time = time.time()
     video_path = "./temp/PEAT_wuwa.avi"  # 분석할 비디오 경로
-    # analyze_flash_risk(video_path, start_time)
+    analyze_flash_sc231(video_path, start_time)
