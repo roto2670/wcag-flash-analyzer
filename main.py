@@ -21,12 +21,11 @@ def relative_luminance_srgb(img_rgb01):
 
 def red_mask(img_rgb01):
     R, G, B = img_rgb01[..., 0], img_rgb01[..., 1], img_rgb01[..., 2]
-    Y = 0.2126 * R + 0.7152 * G + 0.0722 * B
-    red_intense = (R - Y) > 0.3
-    return red_intense
+    red_dominance = R / (R + G + B + 1e-6)  # Zero division 방지
+    return red_dominance >= 0.8
 
 def analyze_video(video_path):
-    lum_delta_threshold = 0.10
+    lum_delta_threshold = 0.1
     area_threshold = 0.25
     window_seconds = 1.0
     downsample = 1 #처리할 프레임 수
@@ -182,16 +181,16 @@ def plot_unified(metrics):
     plt.tight_layout()
     plt.show()
 
-def print_summary(metrics):
-    s = metrics["summary"]
-    print("=== Summary (PEAT-like) ===")
-    for k, v in s.items():
-        print(f"{k}: {v}")
-    # Simple markers of fail spans
-    if s["wcag_2_3_1_fail"]:
-        print("Result: FAIL - >3 flash events within a 1-second window occurred.")
-    else:
-        print("Result: PASS - Three flashes or below threshold.")
+# def print_summary(metrics):
+#     s = metrics["summary"]
+#     print("=== Summary (PEAT-like) ===")
+#     for k, v in s.items():
+#         print(f"{k}: {v}")
+#     # Simple markers of fail spans
+#     if s["wcag_2_3_1_fail"]:
+#         print("Result: FAIL - >3 flash events within a 1-second window occurred.")
+#     else:
+#         print("Result: PASS - Three flashes or below threshold.")
 
 def main():
     ap = argparse.ArgumentParser()
@@ -211,7 +210,7 @@ def main():
         # downsample=args.downsample,
         # max_frames=args.max_frames
     )
-    print_summary(metrics)
+    # print_summary(metrics)
     plot_unified(metrics)
 
 if __name__ == "__main__":
