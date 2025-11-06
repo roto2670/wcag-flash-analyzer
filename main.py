@@ -174,7 +174,7 @@ def plot_unified(metrics):
     plt.xlabel("Time (s)")
     plt.ylabel("Value")
     plt.yticks([])
-    plt.title("PEAT-like Flash Metrics (Unified Overlay)")
+    plt.title("FAKE PEAT")
     legend = plt.legend()
     legend.get_frame().set_facecolor('lightgrey')
     # plt.grid(True, axis='x')
