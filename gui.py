@@ -11,8 +11,9 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QProgressBar, QGroupBox,
     QSpinBox, QDoubleSpinBox, QCheckBox, QStatusBar, QFrame,
+    QLineEdit,
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QColor
 import pyqtgraph as pg
 import numpy as np
@@ -29,6 +30,107 @@ STYLE_CAUTION_PASS = "background-color: #f9e2af; color: #1e1e2e; font-size: 18px
 STYLE_CAUTION_FAIL = "background-color: #fab387; color: #1e1e2e; font-size: 18px; font-weight: bold; padding: 12px; border-radius: 8px;"
 STYLE_FAIL = "background-color: #f38ba8; color: #1e1e2e; font-size: 18px; font-weight: bold; padding: 12px; border-radius: 8px;"
 STYLE_IDLE = "background-color: #45475a; color: #a6adc8; font-size: 18px; font-weight: bold; padding: 12px; border-radius: 8px;"
+
+
+class DownloadWorker(QThread):
+    """YouTube 영상 다운로드 워커 (yt-dlp 사용)"""
+    progress = pyqtSignal(str)       # 상태 메시지
+    finished = pyqtSignal(str)       # 다운로드 완료 → 파일 경로
+    error = pyqtSignal(str)          # 에러 메시지
+
+    def __init__(self, url, output_dir):
+        super().__init__()
+        self.url = url
+        self.output_dir = output_dir
+
+    def run(self):
+        try:
+            import subprocess
+            import tempfile
+
+            os.makedirs(self.output_dir, exist_ok=True)
+            output_template = os.path.join(self.output_dir, "%(title).50s.%(ext)s")
+
+            self.progress.emit("다운로드 시작...")
+
+            # yt-dlp로 720p 이하 다운로드 (분석에 충분한 해상도)
+            cmd = [
+                sys.executable, "-m", "yt_dlp",
+                "--format", "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+                "--merge-output-format", "mp4",
+                "--no-playlist",
+                "--output", output_template,
+                "--print", "after_move:filepath",
+                "--no-simulate",
+                self.url,
+            ]
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=600,  # 10분 타임아웃
+            )
+
+            if result.returncode != 0:
+                # yt_dlp 모듈 방식 실패 시 직접 import 시도
+                self.progress.emit("yt-dlp 직접 호출 시도...")
+                filepath = self._download_with_lib()
+            else:
+                # stdout 마지막 줄에서 파일 경로 추출
+                lines = result.stdout.strip().split("\n")
+                filepath = lines[-1].strip() if lines else ""
+
+            if filepath and os.path.exists(filepath):
+                self.finished.emit(filepath)
+            else:
+                self.error.emit(f"다운로드 실패: 파일을 찾을 수 없습니다.\nstdout: {result.stdout}\nstderr: {result.stderr}")
+
+        except Exception as e:
+            self.error.emit(f"다운로드 오류: {str(e)}")
+
+    def _download_with_lib(self):
+        """yt-dlp를 라이브러리로 직접 사용"""
+        import yt_dlp
+
+        output_template = os.path.join(self.output_dir, "%(title).50s.%(ext)s")
+        filepath_holder = {}
+
+        def progress_hook(d):
+            if d["status"] == "downloading":
+                pct = d.get("_percent_str", "?")
+                self.progress.emit(f"다운로드 중... {pct}")
+            elif d["status"] == "finished":
+                filepath_holder["path"] = d.get("filename", "")
+                self.progress.emit("변환 중...")
+
+        ydl_opts = {
+            "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+            "merge_output_format": "mp4",
+            "noplaylist": True,
+            "outtmpl": output_template,
+            "progress_hooks": [progress_hook],
+            "quiet": True,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([self.url])
+
+        # 파일 경로 찾기
+        if filepath_holder.get("path"):
+            path = filepath_holder["path"]
+            # .webm → .mp4 변환된 경우
+            mp4_path = os.path.splitext(path)[0] + ".mp4"
+            if os.path.exists(mp4_path):
+                return mp4_path
+            if os.path.exists(path):
+                return path
+
+        # output_dir에서 가장 최근 파일 찾기
+        files = [os.path.join(self.output_dir, f) for f in os.listdir(self.output_dir)]
+        if files:
+            return max(files, key=os.path.getmtime)
+        return ""
 
 
 class PEATMainWindow(QMainWindow):
@@ -56,40 +158,60 @@ class PEATMainWindow(QMainWindow):
 
         # ── 상단: 파일 선택 + 옵션 ──
         top_group = QGroupBox("설정")
-        top_layout = QHBoxLayout(top_group)
+        top_layout = QVBoxLayout(top_group)
+
+        # 첫 줄: 파일 선택 + 옵션
+        file_row = QHBoxLayout()
 
         self.btn_file = QPushButton("📁 영상 선택")
         self.btn_file.setFixedWidth(120)
         self.btn_file.clicked.connect(self._select_file)
-        top_layout.addWidget(self.btn_file)
+        file_row.addWidget(self.btn_file)
 
         self.lbl_path = QLabel("선택된 파일 없음")
         self.lbl_path.setStyleSheet("color: #555;")
-        top_layout.addWidget(self.lbl_path, 1)
+        file_row.addWidget(self.lbl_path, 1)
 
         # 옵션
-        top_layout.addWidget(QLabel("Downsample:"))
+        file_row.addWidget(QLabel("Downsample:"))
         self.spin_downsample = QSpinBox()
         self.spin_downsample.setRange(1, 10)
         self.spin_downsample.setValue(1)
         self.spin_downsample.setToolTip("N번째 프레임만 처리 (속도↑, 정밀도↓)")
-        top_layout.addWidget(self.spin_downsample)
+        file_row.addWidget(self.spin_downsample)
 
         self.chk_pattern = QCheckBox("줄무늬 패턴 분석")
         self.chk_pattern.setChecked(True)
-        top_layout.addWidget(self.chk_pattern)
+        file_row.addWidget(self.chk_pattern)
 
         self.btn_start = QPushButton("▶ 분석 시작")
         self.btn_start.setFixedWidth(120)
         self.btn_start.setEnabled(False)
         self.btn_start.clicked.connect(self._start_analysis)
-        top_layout.addWidget(self.btn_start)
+        file_row.addWidget(self.btn_start)
 
         self.btn_stop = QPushButton("⏹ 중지")
         self.btn_stop.setFixedWidth(80)
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self._stop_analysis)
-        top_layout.addWidget(self.btn_stop)
+        file_row.addWidget(self.btn_stop)
+
+        top_layout.addLayout(file_row)
+
+        # 둘째 줄: YouTube URL 입력
+        url_row = QHBoxLayout()
+
+        url_row.addWidget(QLabel("🔗 YouTube URL:"))
+        self.input_url = QLineEdit()
+        self.input_url.setPlaceholderText("https://www.youtube.com/watch?v=... 또는 https://youtu.be/...")
+        url_row.addWidget(self.input_url, 1)
+
+        self.btn_download = QPushButton("⬇ 다운로드 후 분석")
+        self.btn_download.setFixedWidth(160)
+        self.btn_download.clicked.connect(self._download_and_analyze)
+        url_row.addWidget(self.btn_download)
+
+        top_layout.addLayout(url_row)
 
         layout.addWidget(top_group)
 
@@ -243,6 +365,66 @@ class PEATMainWindow(QMainWindow):
             self.lbl_path.setToolTip(path)
             self.btn_start.setEnabled(True)
             self.statusBar().showMessage(f"선택됨: {path}")
+
+    # ──────────────────────────────────────────────────────────────────
+    # YouTube 다운로드 후 분석
+    # ──────────────────────────────────────────────────────────────────
+    def _download_and_analyze(self):
+        url = self.input_url.text().strip()
+        if not url:
+            self.statusBar().showMessage("URL을 입력해주세요.")
+            return
+
+        if "youtube.com" not in url and "youtu.be" not in url:
+            self.statusBar().showMessage("유효한 YouTube URL을 입력해주세요.")
+            return
+
+        # UI 상태 변경
+        self.btn_download.setEnabled(False)
+        self.btn_file.setEnabled(False)
+        self.btn_start.setEnabled(False)
+        self.lbl_status.setText("YouTube 영상 다운로드 중...")
+        self.statusBar().showMessage("다운로드 중...")
+        self.lbl_verdict.setText("다운로드 중...")
+        self.lbl_verdict.setStyleSheet(STYLE_IDLE)
+
+        # temp 폴더
+        import tempfile
+        self._temp_dir = os.path.join(tempfile.gettempdir(), "wcag_flash_temp")
+
+        self.dl_worker = DownloadWorker(url, self._temp_dir)
+        self.dl_worker.progress.connect(self._on_dl_progress)
+        self.dl_worker.finished.connect(self._on_dl_finished)
+        self.dl_worker.error.connect(self._on_dl_error)
+        self.dl_worker.start()
+
+    def _on_dl_progress(self, msg):
+        self.lbl_status.setText(msg)
+        self.statusBar().showMessage(msg)
+
+    def _on_dl_finished(self, filepath):
+        self.video_path = filepath
+        self.lbl_path.setText(f"🎬 {os.path.basename(filepath)}")
+        self.lbl_path.setToolTip(filepath)
+        self.btn_download.setEnabled(True)
+        self.btn_file.setEnabled(True)
+        self.btn_start.setEnabled(True)
+        self.lbl_status.setText(f"다운로드 완료: {os.path.basename(filepath)}")
+        self.statusBar().showMessage("다운로드 완료 — 분석을 시작하세요.")
+        self.lbl_verdict.setText("—")
+        self.lbl_verdict.setStyleSheet(STYLE_IDLE)
+
+        # 자동으로 분석 시작
+        self._start_analysis()
+
+    def _on_dl_error(self, msg):
+        self.btn_download.setEnabled(True)
+        self.btn_file.setEnabled(True)
+        self.lbl_status.setText("다운로드 실패")
+        self.lbl_verdict.setText("오류")
+        self.lbl_verdict.setStyleSheet(STYLE_FAIL)
+        self.lbl_details.setText(f"다운로드 오류: {msg}")
+        self.statusBar().showMessage("다운로드 실패")
 
     # ──────────────────────────────────────────────────────────────────
     # 분석 시작/중지
