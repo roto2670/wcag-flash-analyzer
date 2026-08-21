@@ -535,6 +535,17 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
+    # 폰트 설정 (Windows에서 선명하게)
+    import platform
+    if platform.system() == "Windows":
+        font = QFont("Malgun Gothic", 9)  # 맑은 고딕
+    elif platform.system() == "Darwin":
+        font = QFont("Apple SD Gothic Neo", 12)
+    else:
+        font = QFont("Noto Sans", 10)
+    font.setHintingPreference(QFont.PreferNoHinting)
+    app.setFont(font)
+
     # 다크 모던 테마
     app.setStyleSheet("""
         QMainWindow {
