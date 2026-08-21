@@ -108,7 +108,7 @@ class PEATMainWindow(QMainWindow):
         # X축 스타일: 진한 색 + 눈금 표시
         x_axis = self.plot_widget.getAxis("bottom")
         x_axis.setLabel("Time (s)", color="#222")
-        x_axis.setTickFont(QFont("", 10, QFont.Bold))
+        x_axis.setTickFont(QFont("Malgun Gothic", 10, QFont.Bold))
         x_axis.setPen(pg.mkPen(color="#333", width=2))
         x_axis.setTextPen(pg.mkPen(color="#222"))
         x_axis.setStyle(tickLength=-10)
