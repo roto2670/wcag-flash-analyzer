@@ -56,8 +56,9 @@ class DownloadWorker(QThread):
             # yt-dlp로 720p 이하 다운로드 (ffmpeg 없이 단일 파일로)
             cmd = [
                 sys.executable, "-m", "yt_dlp",
-                "--format", "best[height<=720]/best",
+                "--format", "best[height<=720]/best[height<=1080]/best",
                 "--no-playlist",
+                "--no-check-certificates",
                 "--output", output_template,
                 "--print", "after_move:filepath",
                 "--no-simulate",
@@ -104,11 +105,12 @@ class DownloadWorker(QThread):
                 self.progress.emit("변환 중...")
 
         ydl_opts = {
-            "format": "best[height<=720]/best",
+            "format": "best[height<=720]/best[height<=1080]/best",
             "noplaylist": True,
             "outtmpl": output_template,
             "progress_hooks": [progress_hook],
             "quiet": True,
+            "nocheckcertificate": True,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
