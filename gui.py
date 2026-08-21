@@ -527,7 +527,6 @@ def main():
     # 고DPI 스케일링 (Windows에서 차트 선명하게)
     import os
     os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
-    os.environ["QT_SCALE_FACTOR"] = "1"
 
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
