@@ -53,11 +53,10 @@ class DownloadWorker(QThread):
 
             self.progress.emit("다운로드 시작...")
 
-            # yt-dlp로 720p 이하 다운로드 (ffmpeg 없이 단일 파일로)
+            # yt-dlp로 720p 이하 다운로드 (비디오만, ffmpeg/JS runtime 불필요)
             cmd = [
                 sys.executable, "-m", "yt_dlp",
-                "--format", "best[height<=720]/best[height<=1080]/best",
-                "--extractor-args", "youtube:player_client=mediaconnect",
+                "--format", "bv[height<=720]/bv[height<=1080]/bv/b",
                 "--no-playlist",
                 "--no-check-certificates",
                 "--output", output_template,
@@ -106,8 +105,7 @@ class DownloadWorker(QThread):
                 self.progress.emit("변환 중...")
 
         ydl_opts = {
-            "format": "best[height<=720]/best[height<=1080]/best",
-            "extractor_args": {"youtube": {"player_client": ["mediaconnect"]}},
+            "format": "bv[height<=720]/bv[height<=1080]/bv/b",
             "noplaylist": True,
             "outtmpl": output_template,
             "progress_hooks": [progress_hook],
