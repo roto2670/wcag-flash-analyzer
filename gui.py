@@ -334,10 +334,12 @@ class PEATMainWindow(QMainWindow):
         self.lbl_verdict.setStyleSheet(STYLE_IDLE)
         right_panel.addWidget(self.lbl_verdict)
 
-        # FAIL 구간
+        # FAIL 구간 (클릭하면 해당 시간으로 이동)
         self.lbl_fail_segments = QLabel("")
         self.lbl_fail_segments.setObjectName("failSegments")
         self.lbl_fail_segments.setWordWrap(True)
+        self.lbl_fail_segments.setOpenExternalLinks(False)
+        self.lbl_fail_segments.linkActivated.connect(self._on_fail_segment_click)
         right_panel.addWidget(self.lbl_fail_segments)
 
         right_panel.addStretch()
@@ -780,7 +782,7 @@ class PEATMainWindow(QMainWindow):
         return segments
 
     def _get_fail_timestamps_text(self, times, lum_counts, red_counts):
-        """FAIL 구간을 텍스트로 포맷"""
+        """FAIL 구간을 클릭 가능한 HTML 링크로 포맷"""
         segments = self._get_fail_timestamps(times, lum_counts, red_counts)
         if not segments:
             # CAUTION 구간도 표시
@@ -799,16 +801,38 @@ class PEATMainWindow(QMainWindow):
                 caution_segs.append((start, times[-1]))
 
             if caution_segs:
-                lines = ["⚠️ CAUTION 구간:"]
+                lines = ["<b>⚠️ CAUTION 구간:</b><br>"]
                 for s, e in caution_segs:
-                    lines.append(f"  {s:.2f}s ~ {e:.2f}s")
-                return "\n".join(lines)
+                    lines.append(f'<a href="time:{s:.2f}" style="color:#e0af68; text-decoration:none;">▶ {s:.2f}s ~ {e:.2f}s</a><br>')
+                return "".join(lines)
             return "위험 구간 없음"
 
-        lines = ["🚨 FAIL 구간:"]
+        lines = ["<b>🚨 FAIL 구간:</b><br>"]
         for s, e in segments:
-            lines.append(f"  {s:.2f}s ~ {e:.2f}s")
-        return "\n".join(lines)
+            lines.append(f'<a href="time:{s:.2f}" style="color:#f7768e; text-decoration:none;">▶ {s:.2f}s ~ {e:.2f}s</a><br>')
+        return "".join(lines)
+
+    # ──────────────────────────────────────────────────────────────────
+    # FAIL 구간 클릭 → 해당 시간 프레임 표시 + 차트 이동
+    # ──────────────────────────────────────────────────────────────────
+    def _on_fail_segment_click(self, link):
+        """FAIL 구간 링크 클릭 시 해당 시간의 프레임 표시 + 차트에 수직선"""
+        if not link.startswith("time:"):
+            return
+        try:
+            time_sec = float(link.replace("time:", ""))
+        except ValueError:
+            return
+
+        # 수직선 표시
+        self.vline.setPos(time_sec)
+        self.vline.setVisible(True)
+
+        # 차트를 해당 구간으로 이동 (전후 2초 범위)
+        self.plot_widget.setXRange(max(0, time_sec - 2), time_sec + 5, padding=0)
+
+        # 프레임 미리보기
+        self._show_frame_at_time(time_sec)
 
     # ──────────────────────────────────────────────────────────────────
     # 차트 클릭 → 영상 프레임 표시
