@@ -98,7 +98,7 @@ class PEATMainWindow(QMainWindow):
         chart_layout = QVBoxLayout(chart_group)
 
         # pyqtgraph 설정
-        pg.setConfigOptions(antialias=True)
+        pg.setConfigOptions(antialias=True, useOpenGL=True)
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground("#cfd2d6")
         self.plot_widget.showGrid(x=True, y=False, alpha=0.3)
@@ -525,6 +525,10 @@ class PEATMainWindow(QMainWindow):
 
 def main():
     # 고DPI 스케일링 (Windows에서 차트 선명하게)
+    import os
+    os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
+    os.environ["QT_SCALE_FACTOR"] = "1"
+
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
