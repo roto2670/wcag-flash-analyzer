@@ -19,7 +19,10 @@ import pyqtgraph as pg
 import numpy as np
 
 from worker import AnalysisWorker
-from peat import FAIL_TRANSITIONS, AREA_THRESHOLD, WINDOW_SECONDS, _rolling_max
+from peat import (
+    FAIL_TRANSITIONS, AREA_THRESHOLD, WINDOW_SECONDS, _rolling_max,
+    count_to_band_y, area_to_band_y,
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -550,22 +553,12 @@ class PEATMainWindow(QMainWindow):
 
         ymax = 10.0
         band_top = ymax * 0.30
-        _floor = FAIL_TRANSITIONS - 4
 
-        # peat.py plot_unified와 동일한 로직
-        lum_act = np.clip(lum_window - _floor, 0, None)
-        lum_act = _rolling_max(lum_act, max(1, win // 2))
-        act_scale = (ymax * 0.92) / (lum_act.max() + 1e-9)
-
-        red_act = _rolling_max(sat_area, win)
-        red_scale = (band_top * 0.5) / (red_act.max() + 1e-9)
-
-        diag_scale = (band_top * 0.9) / (lum_window.max() + 1e-9)
-
-        self.curve_lum_act.setData(t_arr, lum_act * act_scale)
-        self.curve_red_act.setData(t_arr, red_act * red_scale)
-        self.curve_lum_diag.setData(t_arr, lum_window * diag_scale)
-        self.curve_red_diag.setData(t_arr, red_window * diag_scale)
+        # peat.py plot_unified와 동일한 로직 — 전환수 임계를 밴드 경계에 고정
+        self.curve_lum_act.setData(t_arr, count_to_band_y(lum_window, band_top))
+        self.curve_red_act.setData(t_arr, area_to_band_y(_rolling_max(sat_area, win), band_top))
+        self.curve_lum_diag.setData(t_arr, count_to_band_y(lum_window, band_top))
+        self.curve_red_diag.setData(t_arr, count_to_band_y(red_window, band_top))
         self.plot_widget.setXRange(0, t_arr[-1] + 0.5, padding=0)
 
         # 실시간 상태
@@ -592,28 +585,15 @@ class PEATMainWindow(QMainWindow):
 
             ymax = 10.0
             band_top = ymax * 0.30
-            _floor = FAIL_TRANSITIONS - 4  # = 3
-
-            # ── Luminance activity (점선, 메인) — peat.py 동일 ──
-            lum_act = np.clip(lum_window - _floor, 0, None)
-            lum_act = _rolling_max(lum_act, max(1, win // 2))
-            act_scale = (ymax * 0.92) / (lum_act.max() + 1e-9)
-
-            # ── Red activity (점선) — sat_area의 rolling_max ──
-            red_act = _rolling_max(sat_area, win)
-            red_scale = (band_top * 0.5) / (red_act.max() + 1e-9)
-
-            # ── Diag (실선, 하단) — 카운트 스케일 ──
-            diag_scale = (band_top * 0.9) / (lum_window.max() + 1e-9)
 
             # ── Extended Flash (파란선) — ≥0.8일 때만 표시 ──
             ext_disp = np.where(ext >= 0.8, ext * band_top, 0.0)
 
-            # 차트 그리기
-            self.curve_lum_act.setData(t, lum_act * act_scale)
-            self.curve_red_act.setData(t, red_act * red_scale)
-            self.curve_lum_diag.setData(t, lum_window * diag_scale)
-            self.curve_red_diag.setData(t, red_window * diag_scale)
+            # 차트 그리기 — 전환수 임계를 밴드 경계에 고정 (peat.py 동일)
+            self.curve_lum_act.setData(t, count_to_band_y(lum_window, band_top))
+            self.curve_red_act.setData(t, area_to_band_y(_rolling_max(sat_area, win), band_top))
+            self.curve_lum_diag.setData(t, count_to_band_y(lum_window, band_top))
+            self.curve_red_diag.setData(t, count_to_band_y(red_window, band_top))
             self.curve_extended.setData(t, ext_disp)
             self.plot_widget.setXRange(0, t[-1] + 0.5, padding=0)
 

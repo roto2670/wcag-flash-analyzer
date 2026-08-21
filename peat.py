@@ -451,6 +451,31 @@ def _rolling_mean(x, win):
 # ──────────────────────────────────────────────────────────────────────────
 # 출력
 # ──────────────────────────────────────────────────────────────────────────
+def count_to_band_y(counts, band_top):
+    """1초 윈도우 전환수 → 밴드 경계에 맞춘 y좌표 (구간별 선형 보간).
+
+      0                    → 0/4·band_top   PASS 바닥
+      FAIL_TRANSITIONS//3  → 1/4·band_top   PASS / CAUTION(PASS) 경계
+      FAIL_TRANSITIONS-1   → 2/4·band_top   CAUTION(PASS) / CAUTION(FAIL) 경계
+      FAIL_TRANSITIONS     → 3/4·band_top   CAUTION(FAIL) / FAIL 경계
+      2×FAIL_TRANSITIONS   → 4/4·band_top   천장 (이상은 클리핑)
+
+    자기 최댓값 정규화가 아니므로 선이 놓인 밴드가 그대로 그 시점의 등급이다.
+    """
+    onethird = max(1, FAIL_TRANSITIONS // 3)
+    xp = [0.0, float(onethird), float(FAIL_TRANSITIONS - 1),
+          float(FAIL_TRANSITIONS), float(FAIL_TRANSITIONS * 2)]
+    fp = [0.0, 0.25 * band_top, 0.50 * band_top, 0.75 * band_top, band_top]
+    return np.interp(np.asarray(counts, dtype=np.float32), xp, fp).astype(np.float32)
+
+
+def area_to_band_y(areas, band_top, area_threshold=AREA_THRESHOLD):
+    """플래시 면적(0~1) → y좌표. 면적 임계가 첫 밴드 경계에 오도록 선형."""
+    a = np.asarray(areas, dtype=np.float32)
+    return np.clip(a / max(1e-9, area_threshold) * (0.25 * band_top),
+                   0.0, band_top).astype(np.float32)
+
+
 def smooth(y, k=5):
     if len(y) < k:
         return y
@@ -487,29 +512,25 @@ def plot_unified(metrics):
       - Luminance/Red flash (점선) = 플래시 '활동'(면적의 1초 윈도우 강도) — 메인, 솟음
       - Lum/Red flash diag (실선) = 플래시 '카운트' — 보조
       - Extended Flash (파란) = 경고 발생(≥0.8) 시에만 표시
+    플래시 선 높이는 자기 최댓값 정규화가 아니라 전환수 임계를 밴드 경계에 고정한 값이다.
     """
     t = metrics["times"]
     verdict = metrics["summary"]["verdict"]
     eff_fps = metrics["summary"]["effective_fps"]
     win = max(1, int(round(eff_fps)))                       # 1초 윈도우
 
-    # 깔끔한 신호는 lum_window(계단)뿐 → 활동은 천장, diag·적색은 하단에 배치
-    # 약한 활동(임계 미만)은 억제 → ex.png처럼 피크만 좁게 솟게(평평한 고원 방지)
-    _floor = FAIL_TRANSITIONS - 4                          # = 3, 약한 노이즈만 제거
-    lum_act = np.clip(metrics["lum_window"].astype(np.float32) - _floor, 0, None)
-    lum_act = _rolling_max(lum_act, max(1, win // 2))      # 골짜기 메워 단일 탑으로
-    red_act = _rolling_max(metrics["sat_area"], win)        # 적색 존재(전환 무관, 7~8초)
-    lum_cnt = metrics["lum_window"].astype(np.float32)      # 휘도 카운트(diag, 하단)
-    red_cnt = metrics["red_window"].astype(np.float32)      # 적색 카운트(diag)
     ext = metrics["extended_series"]
     ext_disp = np.where(ext >= 0.8, ext, 0.0)               # 경고 발생 시에만
 
     ymax = 10.0
     band_top = ymax * 0.30
     h = band_top / 4
-    act_scale = (ymax * 0.92) / (lum_act.max() + 1e-9)             # 휘도 활동 첨탑→천장
-    diag_scale = (band_top * 0.9) / (lum_cnt.max() + 1e-9)         # diag 계단→하단 밴드
-    red_scale = (band_top * 0.5) / (red_act.max() + 1e-9)          # 적색→하단 밴드(낮게)
+
+    # 선 높이를 밴드에 맞춤: 자기 최댓값 정규화 대신 전환수 임계를 밴드 경계에 고정
+    lum_act = count_to_band_y(metrics["lum_window"], band_top)
+    red_act = area_to_band_y(_rolling_max(metrics["sat_area"], win), band_top)
+    lum_cnt = count_to_band_y(metrics["lum_window"], band_top)      # 휘도 카운트(diag)
+    red_cnt = count_to_band_y(metrics["red_window"], band_top)      # 적색 카운트(diag)
 
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.set_facecolor("#cfd2d6")
@@ -523,14 +544,14 @@ def plot_unified(metrics):
                 va="center", ha="left", fontsize=8, color="#777", zorder=1)
 
     # 메인: 휘도 활동(점선) — ex.png에서 천장까지 솟는 'Luminance flash'
-    ax.plot(t, lum_act * act_scale, color="white", linestyle="--", linewidth=1.1, label="Luminance flash")
+    ax.plot(t, lum_act, color="white", linestyle="--", linewidth=1.1, label="Luminance flash")
     # 하단: 적색 존재(점선) — 7~8초 표시
-    ax.plot(t, red_act * red_scale, color="red", linestyle="--", linewidth=1.0, label="Red flash")
+    ax.plot(t, red_act, color="red", linestyle="--", linewidth=1.0, label="Red flash")
     # Extended Flash — 경고 발생 시에만 (PEAT_wuwa는 미발생 → 안 보임)
     ax.plot(t, ext_disp * band_top, color="blue", linewidth=1.2, label="Extended Flash")
     # 하단: 카운트(실선) — Lum/Red flash diag
-    ax.plot(t, lum_cnt * diag_scale, color="white", linewidth=1.0, label="Lum flash diag")
-    ax.plot(t, red_cnt * diag_scale, color="darkred", linewidth=1.0, label="Red flash diag")
+    ax.plot(t, lum_cnt, color="white", linewidth=1.0, label="Lum flash diag")
+    ax.plot(t, red_cnt, color="darkred", linewidth=1.0, label="Red flash diag")
 
     ax.set_xlabel("Time (s)")
     ax.set_yticks([])
