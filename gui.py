@@ -53,11 +53,10 @@ class DownloadWorker(QThread):
 
             self.progress.emit("다운로드 시작...")
 
-            # yt-dlp로 720p 이하 다운로드 (분석에 충분한 해상도)
+            # yt-dlp로 720p 이하 다운로드 (ffmpeg 없이 단일 파일로)
             cmd = [
                 sys.executable, "-m", "yt_dlp",
-                "--format", "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-                "--merge-output-format", "mp4",
+                "--format", "best[height<=720]/best",
                 "--no-playlist",
                 "--output", output_template,
                 "--print", "after_move:filepath",
@@ -105,8 +104,7 @@ class DownloadWorker(QThread):
                 self.progress.emit("변환 중...")
 
         ydl_opts = {
-            "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-            "merge_output_format": "mp4",
+            "format": "best[height<=720]/best",
             "noplaylist": True,
             "outtmpl": output_template,
             "progress_hooks": [progress_hook],
