@@ -144,6 +144,7 @@ class PEATMainWindow(QMainWindow):
         # 범례 (커브 생성 전에 추가해야 인식됨)
         legend = self.plot_widget.addLegend(offset=(10, 10))
         legend.setBrush(pg.mkBrush("#cfd2d6"))
+        legend.setFlag(legend.GraphicsItemFlag.ItemIsMovable, False)
 
         self.curve_lum_act = self.plot_widget.plot(
             pen=pg.mkPen(color="white", width=2, style=Qt.DashLine),
