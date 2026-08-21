@@ -57,6 +57,7 @@ class DownloadWorker(QThread):
             cmd = [
                 sys.executable, "-m", "yt_dlp",
                 "--format", "best[height<=720]/best[height<=1080]/best",
+                "--extractor-args", "youtube:player_client=mediaconnect",
                 "--no-playlist",
                 "--no-check-certificates",
                 "--output", output_template,
@@ -106,6 +107,7 @@ class DownloadWorker(QThread):
 
         ydl_opts = {
             "format": "best[height<=720]/best[height<=1080]/best",
+            "extractor_args": {"youtube": {"player_client": ["mediaconnect"]}},
             "noplaylist": True,
             "outtmpl": output_template,
             "progress_hooks": [progress_hook],
