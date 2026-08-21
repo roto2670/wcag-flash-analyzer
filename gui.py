@@ -310,7 +310,7 @@ class PEATMainWindow(QMainWindow):
 
         # 차트 클릭 시그널
         self.plot_widget.scene().sigMouseClicked.connect(self._on_chart_click)
-        self.vline = pg.InfiniteLine(angle=90, pen=pg.mkPen(color="#FFEB3B", width=1, style=Qt.DashLine))
+        self.vline = pg.InfiniteLine(angle=90, pen=pg.mkPen(color="#FFEB3B", width=3))
         self.vline.setVisible(False)
         self.plot_widget.addItem(self.vline)
 
