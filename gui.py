@@ -220,7 +220,7 @@ class PEATMainWindow(QMainWindow):
         chart_layout = QVBoxLayout(chart_group)
 
         # pyqtgraph 설정
-        pg.setConfigOptions(antialias=True, useOpenGL=True)
+        pg.setConfigOptions(antialias=True, useOpenGL=False)
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground("#cfd2d6")
         self.plot_widget.showGrid(x=True, y=False, alpha=0.3)
@@ -269,19 +269,19 @@ class PEATMainWindow(QMainWindow):
         legend.setFlag(legend.GraphicsItemFlag.ItemIsMovable, False)
 
         self.curve_lum_act = self.plot_widget.plot(
-            pen=pg.mkPen(color="white", width=3),
+            pen=pg.mkPen(color="white", width=2, style=Qt.DashLine),
             name="Luminance flash"
         )
         self.curve_red_act = self.plot_widget.plot(
-            pen=pg.mkPen(color="#FF5252", width=3),
+            pen=pg.mkPen(color="#FF5252", width=2, style=Qt.DashLine),
             name="Red flash"
         )
         self.curve_lum_diag = self.plot_widget.plot(
-            pen=pg.mkPen(color=(255, 255, 255, 100), width=1),
+            pen=pg.mkPen(color="white", width=1),
             name="Lum flash diag"
         )
         self.curve_red_diag = self.plot_widget.plot(
-            pen=pg.mkPen(color=(139, 0, 0, 100), width=1),
+            pen=pg.mkPen(color="darkred", width=1),
             name="Red flash diag"
         )
         self.curve_extended = self.plot_widget.plot(
