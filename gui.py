@@ -524,6 +524,10 @@ class PEATMainWindow(QMainWindow):
 
 
 def main():
+    # 고DPI 스케일링 (Windows에서 차트 선명하게)
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
