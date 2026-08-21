@@ -269,23 +269,23 @@ class PEATMainWindow(QMainWindow):
         legend.setFlag(legend.GraphicsItemFlag.ItemIsMovable, False)
 
         self.curve_lum_act = self.plot_widget.plot(
-            pen=pg.mkPen(color="white", width=2, style=Qt.DashLine),
+            pen=pg.mkPen(color="white", width=3),
             name="Luminance flash"
         )
         self.curve_red_act = self.plot_widget.plot(
-            pen=pg.mkPen(color="#FF5252", width=2, style=Qt.DashLine),
+            pen=pg.mkPen(color="#FF5252", width=3),
             name="Red flash"
         )
         self.curve_lum_diag = self.plot_widget.plot(
-            pen=pg.mkPen(color="white", width=1),
+            pen=pg.mkPen(color=(255, 255, 255, 100), width=1),
             name="Lum flash diag"
         )
         self.curve_red_diag = self.plot_widget.plot(
-            pen=pg.mkPen(color="darkred", width=1),
+            pen=pg.mkPen(color=(139, 0, 0, 100), width=1),
             name="Red flash diag"
         )
         self.curve_extended = self.plot_widget.plot(
-            pen=pg.mkPen(color="blue", width=1.2),
+            pen=pg.mkPen(color="#89b4fa", width=2),
             name="Extended Flash"
         )
 
