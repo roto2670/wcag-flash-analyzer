@@ -25,11 +25,11 @@ from peat import FAIL_TRANSITIONS, AREA_THRESHOLD, WINDOW_SECONDS, _rolling_max
 # ──────────────────────────────────────────────────────────────────────────
 # 스타일 상수
 # ──────────────────────────────────────────────────────────────────────────
-STYLE_PASS = "background-color: #a6e3a1; color: #1e1e2e; font-size: 18px; font-weight: bold; padding: 12px; border-radius: 8px;"
-STYLE_CAUTION_PASS = "background-color: #f9e2af; color: #1e1e2e; font-size: 18px; font-weight: bold; padding: 12px; border-radius: 8px;"
-STYLE_CAUTION_FAIL = "background-color: #fab387; color: #1e1e2e; font-size: 18px; font-weight: bold; padding: 12px; border-radius: 8px;"
-STYLE_FAIL = "background-color: #f38ba8; color: #1e1e2e; font-size: 18px; font-weight: bold; padding: 12px; border-radius: 8px;"
-STYLE_IDLE = "background-color: #45475a; color: #a6adc8; font-size: 18px; font-weight: bold; padding: 12px; border-radius: 8px;"
+STYLE_PASS = "background-color: #9ece6a; color: #1a1b26; font-size: 20px; font-weight: bold; padding: 14px; border-radius: 10px;"
+STYLE_CAUTION_PASS = "background-color: #e0af68; color: #1a1b26; font-size: 20px; font-weight: bold; padding: 14px; border-radius: 10px;"
+STYLE_CAUTION_FAIL = "background-color: #ff9e64; color: #1a1b26; font-size: 20px; font-weight: bold; padding: 14px; border-radius: 10px;"
+STYLE_FAIL = "background-color: #f7768e; color: #1a1b26; font-size: 20px; font-weight: bold; padding: 14px; border-radius: 10px;"
+STYLE_IDLE = "background-color: #24283b; color: #565f89; font-size: 20px; font-weight: bold; padding: 14px; border-radius: 10px; border: 1px solid #414868;"
 
 
 class DownloadWorker(QThread):
@@ -155,80 +155,109 @@ class PEATMainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
-        layout.setSpacing(8)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(12)
 
-        # ── 상단: 파일 선택 + 옵션 ──
-        top_group = QGroupBox("설정")
-        top_layout = QVBoxLayout(top_group)
+        # ── 상단: 입력 영역 ──
+        input_frame = QFrame()
+        input_frame.setObjectName("inputFrame")
+        input_layout = QVBoxLayout(input_frame)
+        input_layout.setContentsMargins(16, 12, 16, 12)
+        input_layout.setSpacing(10)
 
-        # 첫 줄: 파일 선택 + 옵션
+        # 첫 줄: 파일 선택 + 분석 버튼
         file_row = QHBoxLayout()
+        file_row.setSpacing(8)
 
-        self.btn_file = QPushButton("📁 영상 선택")
-        self.btn_file.setFixedWidth(120)
+        self.btn_file = QPushButton("📁  영상 파일 선택")
+        self.btn_file.setObjectName("primaryBtn")
+        self.btn_file.setFixedHeight(36)
         self.btn_file.clicked.connect(self._select_file)
         file_row.addWidget(self.btn_file)
 
-        self.lbl_path = QLabel("선택된 파일 없음")
-        self.lbl_path.setStyleSheet("color: #555;")
+        self.lbl_path = QLabel("파일을 선택하거나 드래그하세요")
+        self.lbl_path.setObjectName("pathLabel")
         file_row.addWidget(self.lbl_path, 1)
 
-        # 옵션
-        file_row.addWidget(QLabel("Downsample:"))
-        self.spin_downsample = QSpinBox()
-        self.spin_downsample.setRange(1, 10)
-        self.spin_downsample.setValue(1)
-        self.spin_downsample.setToolTip("N번째 프레임만 처리 (속도↑, 정밀도↓)")
-        file_row.addWidget(self.spin_downsample)
-
-        self.chk_pattern = QCheckBox("줄무늬 패턴 분석")
-        self.chk_pattern.setChecked(True)
-        file_row.addWidget(self.chk_pattern)
-
-        self.btn_start = QPushButton("▶ 분석 시작")
-        self.btn_start.setFixedWidth(120)
+        self.btn_start = QPushButton("▶  분석")
+        self.btn_start.setObjectName("startBtn")
+        self.btn_start.setFixedSize(100, 36)
         self.btn_start.setEnabled(False)
         self.btn_start.clicked.connect(self._start_analysis)
         file_row.addWidget(self.btn_start)
 
-        self.btn_stop = QPushButton("⏹ 중지")
-        self.btn_stop.setFixedWidth(80)
+        self.btn_stop = QPushButton("⏹")
+        self.btn_stop.setObjectName("stopBtn")
+        self.btn_stop.setFixedSize(36, 36)
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self._stop_analysis)
         file_row.addWidget(self.btn_stop)
 
-        top_layout.addLayout(file_row)
+        input_layout.addLayout(file_row)
 
-        # 둘째 줄: YouTube URL 입력
+        # 둘째 줄: YouTube URL
         url_row = QHBoxLayout()
+        url_row.setSpacing(8)
 
-        url_row.addWidget(QLabel("🔗 YouTube URL:"))
         self.input_url = QLineEdit()
-        self.input_url.setPlaceholderText("https://www.youtube.com/watch?v=... 또는 https://youtu.be/...")
+        self.input_url.setObjectName("urlInput")
+        self.input_url.setPlaceholderText("YouTube URL을 붙여넣으세요...")
+        self.input_url.setFixedHeight(36)
         url_row.addWidget(self.input_url, 1)
 
-        self.btn_download = QPushButton("⬇ 다운로드 후 분석")
-        self.btn_download.setFixedWidth(160)
+        self.btn_download = QPushButton("⬇  URL 분석")
+        self.btn_download.setObjectName("downloadBtn")
+        self.btn_download.setFixedHeight(36)
         self.btn_download.clicked.connect(self._download_and_analyze)
         url_row.addWidget(self.btn_download)
 
-        top_layout.addLayout(url_row)
+        input_layout.addLayout(url_row)
 
-        layout.addWidget(top_group)
+        # 셋째 줄: 옵션
+        opt_row = QHBoxLayout()
+        opt_row.setSpacing(12)
 
-        # ── 중앙: 실시간 차트 ──
-        chart_group = QGroupBox("실시간 분석 차트")
-        chart_layout = QVBoxLayout(chart_group)
+        opt_row.addWidget(QLabel("Downsample:"))
+        self.spin_downsample = QSpinBox()
+        self.spin_downsample.setRange(1, 10)
+        self.spin_downsample.setValue(1)
+        self.spin_downsample.setFixedWidth(60)
+        self.spin_downsample.setToolTip("N번째 프레임만 처리 (속도↑, 정밀도↓)")
+        opt_row.addWidget(self.spin_downsample)
 
-        # pyqtgraph 설정
+        self.chk_pattern = QCheckBox("줄무늬 패턴 분석")
+        self.chk_pattern.setChecked(True)
+        opt_row.addWidget(self.chk_pattern)
+
+        opt_row.addStretch()
+
+        self.btn_export = QPushButton("💾  결과 내보내기")
+        self.btn_export.setObjectName("exportBtn")
+        self.btn_export.setFixedHeight(30)
+        self.btn_export.setEnabled(False)
+        self.btn_export.clicked.connect(self._export_result)
+        opt_row.addWidget(self.btn_export)
+
+        input_layout.addLayout(opt_row)
+        layout.addWidget(input_frame)
+
+        # ── 중앙: 차트 + 프레임 미리보기 ──
+        center_layout = QHBoxLayout()
+        center_layout.setSpacing(12)
+
+        # 차트
+        chart_frame = QFrame()
+        chart_frame.setObjectName("chartFrame")
+        chart_inner = QVBoxLayout(chart_frame)
+        chart_inner.setContentsMargins(8, 8, 8, 8)
+
         pg.setConfigOptions(antialias=True, useOpenGL=False)
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground("#cfd2d6")
         self.plot_widget.showGrid(x=True, y=False, alpha=0.3)
         self.plot_widget.setYRange(0, 10)
-        self.plot_widget.hideAxis("left")  # PEAT 스타일: Y축 숫자 없음
+        self.plot_widget.hideAxis("left")
 
-        # X축 스타일: 진한 색 + 눈금 표시
         x_axis = self.plot_widget.getAxis("bottom")
         x_axis.setLabel("Time (s)", color="#222")
         x_axis.setTickFont(QFont("Malgun Gothic", 10, QFont.Bold))
@@ -236,15 +265,14 @@ class PEATMainWindow(QMainWindow):
         x_axis.setTextPen(pg.mkPen(color="#222"))
         x_axis.setStyle(tickLength=-10)
 
-        # 마우스 줌/패닝 비활성화 (빈 데이터일 때 nan 에러 방지 + PEAT 스타일 고정 뷰)
         self.plot_widget.setMouseEnabled(x=False, y=False)
         self.plot_widget.setMenuEnabled(False)
         self.plot_widget.getViewBox().setAutoVisible(x=False, y=False)
         self.plot_widget.getViewBox().enableAutoRange(axis='xy', enable=False)
-        self.plot_widget.setXRange(0, 1)  # 초기값, 분석 시 갱신됨
+        self.plot_widget.setXRange(0, 1)
 
-        # 4단계 밴드 배경 (하단 30%)
-        band_top = 3.0  # ymax(10) * 0.30
+        # 밴드
+        band_top = 3.0
         h = band_top / 4
         band_colors = ["#c8cbcf", "#bfc3c7", "#b6babe", "#adb1b5"]
         band_labels = ["PASS", "CAUTION (PASS)", "CAUTION (FAIL)", "FAIL"]
@@ -257,114 +285,93 @@ class PEATMainWindow(QMainWindow):
             )
             region.setZValue(-10)
             self.plot_widget.addItem(region)
-            # 밴드 라벨
             text = pg.TextItem(text=f"  {label}", color="#777", anchor=(0, 0.5))
             text.setPos(0, i * h + h / 2)
             text.setZValue(-5)
             self.plot_widget.addItem(text)
 
-        # 시계열 플롯 — PEAT 스타일
-        # 범례 (커브 생성 전에 추가해야 인식됨)
+        # 커브
         legend = self.plot_widget.addLegend(offset=(10, 10))
         legend.setBrush(pg.mkBrush("#cfd2d6"))
         legend.setFlag(legend.GraphicsItemFlag.ItemIsMovable, False)
 
         self.curve_lum_act = self.plot_widget.plot(
-            pen=pg.mkPen(color="white", width=2, style=Qt.DashLine),
-            name="Luminance flash"
-        )
+            pen=pg.mkPen(color="white", width=2, style=Qt.DashLine), name="Luminance flash")
         self.curve_red_act = self.plot_widget.plot(
-            pen=pg.mkPen(color="#FF5252", width=2, style=Qt.DashLine),
-            name="Red flash"
-        )
+            pen=pg.mkPen(color="#FF5252", width=2, style=Qt.DashLine), name="Red flash")
         self.curve_lum_diag = self.plot_widget.plot(
-            pen=pg.mkPen(color="white", width=1),
-            name="Lum flash diag"
-        )
+            pen=pg.mkPen(color="white", width=1), name="Lum flash diag")
         self.curve_red_diag = self.plot_widget.plot(
-            pen=pg.mkPen(color="darkred", width=1),
-            name="Red flash diag"
-        )
+            pen=pg.mkPen(color="darkred", width=1), name="Red flash diag")
         self.curve_extended = self.plot_widget.plot(
-            pen=pg.mkPen(color="#89b4fa", width=2),
-            name="Extended Flash"
-        )
+            pen=pg.mkPen(color="#89b4fa", width=2), name="Extended Flash")
 
-        chart_layout.addWidget(self.plot_widget)
+        chart_inner.addWidget(self.plot_widget)
 
-        # 프레임 미리보기 (차트 클릭 시 해당 시간의 영상 프레임 표시)
-        self.frame_preview = QLabel("차트를 클릭하면 해당 시간의 프레임이 표시됩니다")
-        self.frame_preview.setAlignment(Qt.AlignCenter)
-        self.frame_preview.setFixedHeight(200)
-        self.frame_preview.setStyleSheet(
-            "background-color: #181825; color: #6c7086; font-size: 11px; border-radius: 8px; border: 1px solid #313244;"
-        )
-        chart_layout.addWidget(self.frame_preview)
-
-        # 차트 클릭 시그널 연결
+        # 차트 클릭 시그널
         self.plot_widget.scene().sigMouseClicked.connect(self._on_chart_click)
-        # 클릭 위치 표시용 수직선
         self.vline = pg.InfiniteLine(angle=90, pen=pg.mkPen(color="#FFEB3B", width=1, style=Qt.DashLine))
         self.vline.setVisible(False)
         self.plot_widget.addItem(self.vline)
 
-        layout.addWidget(chart_group, 1)
+        center_layout.addWidget(chart_frame, 3)
 
-        # ── 하단: 진행률 + 판정 ──
-        bottom_layout = QHBoxLayout()
+        # 우측: 프레임 미리보기 + 판정
+        right_panel = QVBoxLayout()
+        right_panel.setSpacing(10)
 
-        # 진행률
-        progress_frame = QVBoxLayout()
+        # 프레임 미리보기
+        self.frame_preview = QLabel("차트 클릭 시\n프레임 표시")
+        self.frame_preview.setAlignment(Qt.AlignCenter)
+        self.frame_preview.setMinimumSize(280, 180)
+        self.frame_preview.setObjectName("framePreview")
+        right_panel.addWidget(self.frame_preview)
+
+        # 판정 결과
+        self.lbl_verdict = QLabel("—")
+        self.lbl_verdict.setAlignment(Qt.AlignCenter)
+        self.lbl_verdict.setObjectName("verdict")
+        self.lbl_verdict.setStyleSheet(STYLE_IDLE)
+        right_panel.addWidget(self.lbl_verdict)
+
+        # FAIL 구간
+        self.lbl_fail_segments = QLabel("")
+        self.lbl_fail_segments.setObjectName("failSegments")
+        self.lbl_fail_segments.setWordWrap(True)
+        right_panel.addWidget(self.lbl_fail_segments)
+
+        right_panel.addStretch()
+        center_layout.addLayout(right_panel, 1)
+
+        layout.addLayout(center_layout, 1)
+
+        # ── 하단: 진행률 + 상세 ──
+        bottom_frame = QFrame()
+        bottom_frame.setObjectName("bottomFrame")
+        bottom_layout = QHBoxLayout(bottom_frame)
+        bottom_layout.setContentsMargins(12, 8, 12, 8)
+
+        progress_col = QVBoxLayout()
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFormat("%v / %m 프레임 (%p%)")
-        progress_frame.addWidget(self.progress_bar)
+        self.progress_bar.setFixedHeight(18)
+        progress_col.addWidget(self.progress_bar)
 
         self.lbl_status = QLabel("대기 중")
-        self.lbl_status.setStyleSheet("color: #666; font-size: 12px;")
-        progress_frame.addWidget(self.lbl_status)
-        bottom_layout.addLayout(progress_frame, 1)
+        self.lbl_status.setObjectName("statusLabel")
+        progress_col.addWidget(self.lbl_status)
 
-        # 판정 표시
-        verdict_frame = QVBoxLayout()
-        verdict_frame.setAlignment(Qt.AlignCenter)
-
-        self.lbl_verdict_title = QLabel("판정 결과")
-        self.lbl_verdict_title.setAlignment(Qt.AlignCenter)
-        self.lbl_verdict_title.setStyleSheet("font-size: 11px; color: #666;")
-        verdict_frame.addWidget(self.lbl_verdict_title)
-
-        self.lbl_verdict = QLabel("—")
-        self.lbl_verdict.setAlignment(Qt.AlignCenter)
-        self.lbl_verdict.setFixedWidth(250)
-        self.lbl_verdict.setStyleSheet(STYLE_IDLE)
-        verdict_frame.addWidget(self.lbl_verdict)
-
-        bottom_layout.addLayout(verdict_frame)
-
-        # 내보내기 버튼
-        self.btn_export = QPushButton("💾 결과 내보내기")
-        self.btn_export.setFixedWidth(140)
-        self.btn_export.setEnabled(False)
-        self.btn_export.clicked.connect(self._export_result)
-        bottom_layout.addWidget(self.btn_export)
-
-        layout.addLayout(bottom_layout)
-
-        # FAIL 구간 타임스탬프
-        self.lbl_fail_segments = QLabel("")
-        self.lbl_fail_segments.setStyleSheet("font-size: 11px; color: #ff6b6b; padding: 4px;")
-        self.lbl_fail_segments.setWordWrap(True)
-        layout.addWidget(self.lbl_fail_segments)
-
-        # 상세 결과
         self.lbl_details = QLabel("")
-        self.lbl_details.setStyleSheet("font-size: 11px; color: #444; padding: 4px;")
+        self.lbl_details.setObjectName("detailsLabel")
         self.lbl_details.setWordWrap(True)
-        layout.addWidget(self.lbl_details)
+        progress_col.addWidget(self.lbl_details)
+
+        bottom_layout.addLayout(progress_col)
+        layout.addWidget(bottom_frame)
 
         # 상태바
-        self.statusBar().showMessage("영상을 선택한 후 분석을 시작하세요.")
+        self.statusBar().showMessage("영상을 선택하거나 드래그하세요.")
 
     # ──────────────────────────────────────────────────────────────────
     # 파일 선택
@@ -898,86 +905,155 @@ def main():
 
     # 다크 모던 테마
     app.setStyleSheet("""
-        QMainWindow {
-            background-color: #1e1e2e;
+        QMainWindow, QWidget {
+            background-color: #1a1b26;
+            color: #c0caf5;
         }
-        QWidget {
-            background-color: #1e1e2e;
-            color: #cdd6f4;
+        #inputFrame {
+            background-color: #24283b;
+            border-radius: 10px;
+            border: 1px solid #414868;
+        }
+        #chartFrame {
+            background-color: #24283b;
+            border-radius: 10px;
+            border: 1px solid #414868;
+        }
+        #bottomFrame {
+            background-color: #24283b;
+            border-radius: 8px;
+            border: 1px solid #414868;
+        }
+        #framePreview {
+            background-color: #1a1b26;
+            color: #565f89;
+            font-size: 11px;
+            border-radius: 8px;
+            border: 1px solid #414868;
+        }
+        #pathLabel {
+            color: #7aa2f7;
+            font-size: 12px;
+            padding-left: 8px;
+        }
+        #urlInput {
+            background-color: #1a1b26;
+            color: #c0caf5;
+            border: 1px solid #414868;
+            border-radius: 6px;
+            padding: 6px 12px;
             font-size: 12px;
         }
-        QGroupBox {
-            border: 1px solid #45475a;
-            border-radius: 8px;
-            margin-top: 12px;
-            padding-top: 16px;
+        #urlInput:focus {
+            border-color: #7aa2f7;
+        }
+        #primaryBtn {
+            background-color: #7aa2f7;
+            color: #1a1b26;
+            border: none;
+            border-radius: 6px;
+            padding: 8px 20px;
             font-weight: bold;
-            color: #cdd6f4;
+            font-size: 12px;
         }
-        QGroupBox::title {
-            subcontrol-origin: margin;
-            left: 12px;
-            padding: 0 6px;
+        #primaryBtn:hover { background-color: #89b4fa; }
+        #primaryBtn:pressed { background-color: #6a92e7; }
+        #startBtn {
+            background-color: #9ece6a;
+            color: #1a1b26;
+            border: none;
+            border-radius: 6px;
+            font-weight: bold;
+            font-size: 13px;
         }
-        QPushButton {
-            background-color: #45475a;
-            color: #cdd6f4;
+        #startBtn:hover { background-color: #a9d87a; }
+        #startBtn:disabled { background-color: #414868; color: #565f89; }
+        #stopBtn {
+            background-color: #f7768e;
+            color: #1a1b26;
+            border: none;
+            border-radius: 6px;
+            font-weight: bold;
+            font-size: 14px;
+        }
+        #stopBtn:hover { background-color: #ff899e; }
+        #stopBtn:disabled { background-color: #414868; color: #565f89; }
+        #downloadBtn {
+            background-color: #bb9af7;
+            color: #1a1b26;
             border: none;
             border-radius: 6px;
             padding: 8px 16px;
             font-weight: bold;
         }
-        QPushButton:hover {
-            background-color: #585b70;
+        #downloadBtn:hover { background-color: #c8a8ff; }
+        #exportBtn {
+            background-color: transparent;
+            color: #7aa2f7;
+            border: 1px solid #7aa2f7;
+            border-radius: 6px;
+            padding: 4px 12px;
+            font-size: 11px;
         }
-        QPushButton:pressed {
-            background-color: #6c7086;
+        #exportBtn:hover { background-color: #7aa2f720; }
+        #exportBtn:disabled { border-color: #414868; color: #565f89; }
+        #statusLabel {
+            color: #565f89;
+            font-size: 11px;
         }
-        QPushButton:disabled {
-            background-color: #313244;
-            color: #6c7086;
+        #detailsLabel {
+            color: #a9b1d6;
+            font-size: 11px;
+        }
+        #failSegments {
+            color: #f7768e;
+            font-size: 11px;
+        }
+        #verdict {
+            font-size: 20px;
+            font-weight: bold;
+            padding: 14px;
+            border-radius: 10px;
         }
         QProgressBar {
             border: none;
             border-radius: 4px;
-            background-color: #313244;
+            background-color: #1a1b26;
             text-align: center;
-            color: #cdd6f4;
-            height: 20px;
+            color: #c0caf5;
+            font-size: 10px;
         }
         QProgressBar::chunk {
-            background-color: #89b4fa;
+            background-color: #7aa2f7;
             border-radius: 4px;
         }
-        QLabel {
-            color: #cdd6f4;
-        }
-        QSpinBox, QDoubleSpinBox {
-            background-color: #313244;
-            color: #cdd6f4;
-            border: 1px solid #45475a;
+        QSpinBox {
+            background-color: #1a1b26;
+            color: #c0caf5;
+            border: 1px solid #414868;
             border-radius: 4px;
             padding: 4px;
         }
         QCheckBox {
-            color: #cdd6f4;
+            color: #a9b1d6;
             spacing: 6px;
         }
         QCheckBox::indicator {
-            width: 16px;
-            height: 16px;
-            border-radius: 3px;
-            border: 1px solid #45475a;
-            background-color: #313244;
+            width: 16px; height: 16px;
+            border-radius: 4px;
+            border: 1px solid #414868;
+            background-color: #1a1b26;
         }
         QCheckBox::indicator:checked {
-            background-color: #89b4fa;
-            border-color: #89b4fa;
+            background-color: #7aa2f7;
+            border-color: #7aa2f7;
         }
+        QLabel { color: #a9b1d6; }
         QStatusBar {
-            background-color: #181825;
-            color: #a6adc8;
-            border-top: 1px solid #313244;
+            background-color: #16161e;
+            color: #565f89;
+            border-top: 1px solid #414868;
+            font-size: 11px;
         }
     """)
 
