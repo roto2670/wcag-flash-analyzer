@@ -140,6 +140,8 @@ class PEATMainWindow(QMainWindow):
         self.setMinimumSize(1100, 700)
         self.setAcceptDrops(True)
         self.worker = None
+        self._current_preview_time = None  # 현재 미리보기 프레임 시간
+        self._video_fps = 30.0             # 영상 fps (프레임 이동용)
 
         # 데이터 버퍼
         self.times = []
@@ -670,6 +672,27 @@ class PEATMainWindow(QMainWindow):
         self.worker = None
 
     # ──────────────────────────────────────────────────────────────────
+    # 키보드: 좌우 방향키로 1프레임 이동
+    # ──────────────────────────────────────────────────────────────────
+    def keyPressEvent(self, event):
+        if self._current_preview_time is None or not hasattr(self, "video_path"):
+            super().keyPressEvent(event)
+            return
+
+        frame_duration = 1.0 / self._video_fps
+
+        if event.key() == Qt.Key_Left:
+            new_time = max(0, self._current_preview_time - frame_duration)
+            self.vline.setPos(new_time)
+            self._show_frame_at_time(new_time)
+        elif event.key() == Qt.Key_Right:
+            new_time = self._current_preview_time + frame_duration
+            self.vline.setPos(new_time)
+            self._show_frame_at_time(new_time)
+        else:
+            super().keyPressEvent(event)
+
+    # ──────────────────────────────────────────────────────────────────
     # 드래그 앤 드롭
     # ──────────────────────────────────────────────────────────────────
     def dragEnterEvent(self, event):
@@ -870,6 +893,8 @@ class PEATMainWindow(QMainWindow):
             fps = cap.get(cv2.CAP_PROP_FPS)
             if fps <= 0:
                 fps = 30.0
+            self._video_fps = fps
+            self._current_preview_time = time_sec
 
             # 해당 시간으로 seek
             frame_num = int(time_sec * fps)
