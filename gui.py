@@ -138,6 +138,7 @@ class PEATMainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("WCAG 2.3.1 Flash Analysis")
         self.setMinimumSize(1100, 700)
+        self.setAcceptDrops(True)
         self.worker = None
 
         # 데이터 버퍼
@@ -340,7 +341,21 @@ class PEATMainWindow(QMainWindow):
         verdict_frame.addWidget(self.lbl_verdict)
 
         bottom_layout.addLayout(verdict_frame)
+
+        # 내보내기 버튼
+        self.btn_export = QPushButton("💾 결과 내보내기")
+        self.btn_export.setFixedWidth(140)
+        self.btn_export.setEnabled(False)
+        self.btn_export.clicked.connect(self._export_result)
+        bottom_layout.addWidget(self.btn_export)
+
         layout.addLayout(bottom_layout)
+
+        # FAIL 구간 타임스탬프
+        self.lbl_fail_segments = QLabel("")
+        self.lbl_fail_segments.setStyleSheet("font-size: 11px; color: #ff6b6b; padding: 4px;")
+        self.lbl_fail_segments.setWordWrap(True)
+        layout.addWidget(self.lbl_fail_segments)
 
         # 상세 결과
         self.lbl_details = QLabel("")
@@ -624,6 +639,16 @@ class PEATMainWindow(QMainWindow):
         self.lbl_status.setText("분석 완료")
         self.statusBar().showMessage(f"분석 완료 — {verdict}")
 
+        # FAIL 구간 타임스탬프 표시
+        t = np.array(self.times)
+        lum_counts = np.array(self.lum_window_counts, dtype=np.float32)
+        red_counts = np.array(self.red_window_counts, dtype=np.float32)
+        fail_text = self._get_fail_timestamps_text(t, lum_counts, red_counts)
+        self.lbl_fail_segments.setText(fail_text)
+
+        # 내보내기 버튼 활성화
+        self.btn_export.setEnabled(True)
+
         self.worker = None
 
     def _on_error(self, msg):
@@ -634,6 +659,149 @@ class PEATMainWindow(QMainWindow):
         self.lbl_status.setText("오류 발생")
         self.statusBar().showMessage(f"오류: {msg}")
         self.worker = None
+
+    # ──────────────────────────────────────────────────────────────────
+    # 드래그 앤 드롭
+    # ──────────────────────────────────────────────────────────────────
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        if urls:
+            path = urls[0].toLocalFile()
+            if path:
+                self.video_path = path
+                self.lbl_path.setText(os.path.basename(path))
+                self.lbl_path.setToolTip(path)
+                self.btn_start.setEnabled(True)
+                self.statusBar().showMessage(f"드롭됨: {path}")
+                # 자동 분석 시작
+                self._start_analysis()
+
+    # ──────────────────────────────────────────────────────────────────
+    # 결과 이미지/PDF 내보내기
+    # ──────────────────────────────────────────────────────────────────
+    def _export_result(self):
+        """차트 + 판정 결과를 PNG/PDF로 저장"""
+        if not self.times:
+            self.statusBar().showMessage("내보낼 분석 결과가 없습니다.")
+            return
+
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self, "결과 내보내기", "flash_analysis_result",
+            "PNG Image (*.png);;PDF Document (*.pdf)"
+        )
+        if not path:
+            return
+
+        import pyqtgraph.exporters as exporters
+
+        if path.endswith(".pdf"):
+            # PDF: matplotlib로 재생성
+            self._export_pdf(path)
+        else:
+            # PNG: pyqtgraph 차트 캡처
+            if not path.endswith(".png"):
+                path += ".png"
+            exporter = exporters.ImageExporter(self.plot_widget.plotItem)
+            exporter.parameters()["width"] = 1920
+            exporter.export(path)
+            self.statusBar().showMessage(f"이미지 저장: {path}")
+
+    def _export_pdf(self, path):
+        """matplotlib로 PDF 생성 (차트 + 판정 정보 포함)"""
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_pdf import PdfPages
+
+        t = np.array(self.times)
+        lum_counts = np.array(self.lum_window_counts, dtype=np.float32)
+        red_counts = np.array(self.red_window_counts, dtype=np.float32)
+
+        with PdfPages(path) as pdf:
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.set_facecolor("#cfd2d6")
+            ax.plot(t, lum_counts, color="white", linewidth=1.5, label="Luminance flash")
+            ax.plot(t, red_counts, color="red", linewidth=1.5, label="Red flash")
+            ax.axhline(y=FAIL_TRANSITIONS, color="black", linestyle="--", label=f"FAIL ({FAIL_TRANSITIONS})")
+            ax.set_xlabel("Time (s)")
+            ax.set_ylabel("Transitions / 1s window")
+            ax.set_title(f"WCAG 2.3.1 Flash Analysis — {self.lbl_verdict.text()}")
+            ax.legend()
+            ax.set_ylim(0, max(FAIL_TRANSITIONS + 2, lum_counts.max() + 2))
+            plt.tight_layout()
+            pdf.savefig(fig)
+            plt.close(fig)
+
+            # 두 번째 페이지: 판정 정보 + FAIL 구간
+            fig2, ax2 = plt.subplots(figsize=(12, 4))
+            ax2.axis("off")
+            info_text = self.lbl_details.text()
+            fail_text = self._get_fail_timestamps_text(t, lum_counts, red_counts)
+            full_text = f"판정: {self.lbl_verdict.text()}\n\n{info_text}\n\n{fail_text}"
+            ax2.text(0.05, 0.95, full_text, transform=ax2.transAxes,
+                     fontsize=11, verticalalignment="top", fontfamily="monospace")
+            plt.tight_layout()
+            pdf.savefig(fig2)
+            plt.close(fig2)
+
+        self.statusBar().showMessage(f"PDF 저장: {path}")
+
+    # ──────────────────────────────────────────────────────────────────
+    # FAIL 구간 타임스탬프
+    # ──────────────────────────────────────────────────────────────────
+    def _get_fail_timestamps(self, times, lum_counts, red_counts):
+        """FAIL 임계값을 넘는 구간의 시작~끝 타임스탬프 리스트 반환"""
+        threshold = FAIL_TRANSITIONS
+        combined = np.maximum(lum_counts, red_counts)
+        in_fail = combined >= threshold
+
+        segments = []
+        start = None
+        for i, flag in enumerate(in_fail):
+            if flag and start is None:
+                start = times[i]
+            elif not flag and start is not None:
+                segments.append((start, times[i - 1]))
+                start = None
+        if start is not None:
+            segments.append((start, times[-1]))
+
+        return segments
+
+    def _get_fail_timestamps_text(self, times, lum_counts, red_counts):
+        """FAIL 구간을 텍스트로 포맷"""
+        segments = self._get_fail_timestamps(times, lum_counts, red_counts)
+        if not segments:
+            # CAUTION 구간도 표시
+            caution_thresh = FAIL_TRANSITIONS - 1
+            combined = np.maximum(lum_counts, red_counts)
+            in_caution = combined >= caution_thresh
+            caution_segs = []
+            start = None
+            for i, flag in enumerate(in_caution):
+                if flag and start is None:
+                    start = times[i]
+                elif not flag and start is not None:
+                    caution_segs.append((start, times[i - 1]))
+                    start = None
+            if start is not None:
+                caution_segs.append((start, times[-1]))
+
+            if caution_segs:
+                lines = ["⚠️ CAUTION 구간:"]
+                for s, e in caution_segs:
+                    lines.append(f"  {s:.2f}s ~ {e:.2f}s")
+                return "\n".join(lines)
+            return "위험 구간 없음"
+
+        lines = ["🚨 FAIL 구간:"]
+        for s, e in segments:
+            lines.append(f"  {s:.2f}s ~ {e:.2f}s")
+        return "\n".join(lines)
 
     # ──────────────────────────────────────────────────────────────────
     # 차트 클릭 → 영상 프레임 표시
