@@ -1007,7 +1007,8 @@ def main():
         }
         #failSegments {
             color: #f7768e;
-            font-size: 11px;
+            font-size: 14px;
+            font-weight: bold;
         }
         #verdict {
             font-size: 20px;
