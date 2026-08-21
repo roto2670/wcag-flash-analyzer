@@ -1,0 +1,7 @@
+PyQt5==5.15.11
+pyqtgraph==0.13.3
+opencv-python>=4.10.0
+numpy==1.24.4
+matplotlib==3.7.5
+nuitka>=2.4
+ordered-set>=4.1.0
