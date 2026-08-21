@@ -53,10 +53,10 @@ class DownloadWorker(QThread):
 
             self.progress.emit("다운로드 시작...")
 
-            # yt-dlp로 720p 이하 다운로드 (비디오만, ffmpeg/JS runtime 불필요)
+            # yt-dlp로 720p 이하 다운로드 (비디오만, H.264 우선)
             cmd = [
                 sys.executable, "-m", "yt_dlp",
-                "--format", "bv[height<=720]/bv[height<=1080]/bv/b",
+                "--format", "bv[height<=720][vcodec^=avc]/bv[height<=720]/bv[height<=1080][vcodec^=avc]/bv/b",
                 "--no-playlist",
                 "--no-check-certificates",
                 "--output", output_template,
@@ -105,7 +105,7 @@ class DownloadWorker(QThread):
                 self.progress.emit("변환 중...")
 
         ydl_opts = {
-            "format": "bv[height<=720]/bv[height<=1080]/bv/b",
+            "format": "bv[height<=720][vcodec^=avc]/bv[height<=720]/bv[height<=1080][vcodec^=avc]/bv/b",
             "noplaylist": True,
             "outtmpl": output_template,
             "progress_hooks": [progress_hook],
