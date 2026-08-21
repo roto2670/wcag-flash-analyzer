@@ -24,11 +24,11 @@ from peat import FAIL_TRANSITIONS, AREA_THRESHOLD, WINDOW_SECONDS, _rolling_max
 # ──────────────────────────────────────────────────────────────────────────
 # 스타일 상수
 # ──────────────────────────────────────────────────────────────────────────
-STYLE_PASS = "background-color: #4CAF50; color: white; font-size: 18px; font-weight: bold; padding: 12px; border-radius: 6px;"
-STYLE_CAUTION_PASS = "background-color: #FF9800; color: white; font-size: 18px; font-weight: bold; padding: 12px; border-radius: 6px;"
-STYLE_CAUTION_FAIL = "background-color: #FF5722; color: white; font-size: 18px; font-weight: bold; padding: 12px; border-radius: 6px;"
-STYLE_FAIL = "background-color: #F44336; color: white; font-size: 18px; font-weight: bold; padding: 12px; border-radius: 6px;"
-STYLE_IDLE = "background-color: #9E9E9E; color: white; font-size: 18px; font-weight: bold; padding: 12px; border-radius: 6px;"
+STYLE_PASS = "background-color: #a6e3a1; color: #1e1e2e; font-size: 18px; font-weight: bold; padding: 12px; border-radius: 8px;"
+STYLE_CAUTION_PASS = "background-color: #f9e2af; color: #1e1e2e; font-size: 18px; font-weight: bold; padding: 12px; border-radius: 8px;"
+STYLE_CAUTION_FAIL = "background-color: #fab387; color: #1e1e2e; font-size: 18px; font-weight: bold; padding: 12px; border-radius: 8px;"
+STYLE_FAIL = "background-color: #f38ba8; color: #1e1e2e; font-size: 18px; font-weight: bold; padding: 12px; border-radius: 8px;"
+STYLE_IDLE = "background-color: #45475a; color: #a6adc8; font-size: 18px; font-weight: bold; padding: 12px; border-radius: 8px;"
 
 
 class PEATMainWindow(QMainWindow):
@@ -173,7 +173,7 @@ class PEATMainWindow(QMainWindow):
         self.frame_preview.setAlignment(Qt.AlignCenter)
         self.frame_preview.setFixedHeight(200)
         self.frame_preview.setStyleSheet(
-            "background-color: #222; color: #999; font-size: 11px; border-radius: 4px;"
+            "background-color: #181825; color: #6c7086; font-size: 11px; border-radius: 8px; border: 1px solid #313244;"
         )
         chart_layout.addWidget(self.frame_preview)
 
@@ -527,8 +527,90 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
-    # 다크 팔레트 (선택사항 — Fusion + 기본색 유지)
-    app.setFont(app.font())  # 시스템 기본 폰트 사용
+    # 다크 모던 테마
+    app.setStyleSheet("""
+        QMainWindow {
+            background-color: #1e1e2e;
+        }
+        QWidget {
+            background-color: #1e1e2e;
+            color: #cdd6f4;
+            font-size: 12px;
+        }
+        QGroupBox {
+            border: 1px solid #45475a;
+            border-radius: 8px;
+            margin-top: 12px;
+            padding-top: 16px;
+            font-weight: bold;
+            color: #cdd6f4;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 12px;
+            padding: 0 6px;
+        }
+        QPushButton {
+            background-color: #45475a;
+            color: #cdd6f4;
+            border: none;
+            border-radius: 6px;
+            padding: 8px 16px;
+            font-weight: bold;
+        }
+        QPushButton:hover {
+            background-color: #585b70;
+        }
+        QPushButton:pressed {
+            background-color: #6c7086;
+        }
+        QPushButton:disabled {
+            background-color: #313244;
+            color: #6c7086;
+        }
+        QProgressBar {
+            border: none;
+            border-radius: 4px;
+            background-color: #313244;
+            text-align: center;
+            color: #cdd6f4;
+            height: 20px;
+        }
+        QProgressBar::chunk {
+            background-color: #89b4fa;
+            border-radius: 4px;
+        }
+        QLabel {
+            color: #cdd6f4;
+        }
+        QSpinBox, QDoubleSpinBox {
+            background-color: #313244;
+            color: #cdd6f4;
+            border: 1px solid #45475a;
+            border-radius: 4px;
+            padding: 4px;
+        }
+        QCheckBox {
+            color: #cdd6f4;
+            spacing: 6px;
+        }
+        QCheckBox::indicator {
+            width: 16px;
+            height: 16px;
+            border-radius: 3px;
+            border: 1px solid #45475a;
+            background-color: #313244;
+        }
+        QCheckBox::indicator:checked {
+            background-color: #89b4fa;
+            border-color: #89b4fa;
+        }
+        QStatusBar {
+            background-color: #181825;
+            color: #a6adc8;
+            border-top: 1px solid #313244;
+        }
+    """)
 
     window = PEATMainWindow()
     window.show()
