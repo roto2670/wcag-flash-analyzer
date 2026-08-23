@@ -598,8 +598,8 @@ class PEATMainWindow(QMainWindow):
             # 분석 완료 후 줌/슬라이드 활성화
             self.plot_widget.setMouseEnabled(x=True, y=True)
             self.plot_widget.setMenuEnabled(True)
-            # 축 범위 제한: 음수 영역 안 보이게
-            self.plot_widget.setLimits(xMin=0, yMin=0)
+            # 축 범위 제한: 음수 영역 + 영상 길이 밖으로 줌아웃 안 되게
+            self.plot_widget.setLimits(xMin=0, xMax=t[-1] + 0.5, yMin=0, yMax=10.0)
 
         # 판정 스타일 적용
         if verdict == "PASS":
