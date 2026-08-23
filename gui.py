@@ -538,10 +538,8 @@ class PEATMainWindow(QMainWindow):
         self.red_window_counts.append(data["red_window_count"])
         self.sat_areas.append(data.get("sat_area", 0.0))
 
-        # 차트 렌더링: 10포인트마다 (UI 성능 유지)
+        # 차트 렌더링: 매 프레임
         n = len(self.times)
-        if n % 10 != 0:
-            return
 
         t_arr = np.array(self.times)
         lum_window = np.array(self.lum_window_counts, dtype=np.float32)

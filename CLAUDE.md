@@ -81,7 +81,7 @@ python peat.py --video ./temp/<영상파일> --no_show  # 그래프 없이 콘�
 ### GUI 흐름 — `gui.py`
 
 - 입력 3경로: 파일 선택 / 드래그앤드롭 / YouTube URL(`DownloadWorker` — yt-dlp subprocess 우선, 실패 시 라이브러리 직접 호출; `%TEMP%/wcag_flash_temp`에 720p 이하 H.264 우선 비디오만 다운로드 후 자동 분석 시작).
-- 분석 중: `frame_result` 시그널마다 데이터 누적, **10포인트마다** 차트 갱신(성능). 완료 후 summary의 전체 시계열로 최종 차트를 다시 그리고 줌/팬 활성화.
+- 분석 중: `frame_result` 시그널마다 데이터 누적 + 매 프레임 차트 갱신. 완료 후 summary의 전체 시계열로 최종 차트를 다시 그리고 줌/팬 활성화.
 - 상호작용: FAIL 구간 타임스탬프 링크·차트 클릭 → `_show_frame_at_time`으로 해당 프레임 미리보기 + 수직선(`vline`); 좌우 방향키로 1프레임씩 이동(`keyPressEvent`).
 - 내보내기: PNG은 pyqtgraph `ImageExporter`, PDF는 matplotlib(Agg)로 차트+판정 정보 2페이지 재생성.
 - OpenGL은 꺼져 있음 — pyqtgraph OpenGL이 DashLine 스타일을 무시하는 문제(commit c0a17ad). 코덱은 H.264 우선(AV1 디코더의 OS간 차이 회피).
