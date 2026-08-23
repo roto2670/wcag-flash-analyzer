@@ -92,7 +92,10 @@ def local_area_fraction(mask):
     H, W = mask.shape
     kh, kw = max(1, H // 3), max(1, W // 3)
     local = cv2.boxFilter(mask.astype(np.float32), -1, (kw, kh), normalize=True)
-    return float(local.max())
+    # 박스가 화면 안에 완전히 들어가는 '유효' 중심만 취함 — 기본 border 반사가
+    # 모서리 플래시를 거울상으로 복제해 밀도를 과대평가하는 것을 방지.
+    y0, x0 = kh // 2, kw // 2
+    return float(local[y0:y0 + H - kh + 1, x0:x0 + W - kw + 1].max())
 
 
 def harmful_luminance_mask(L_a, L_b):
@@ -244,12 +247,24 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
             processed += 1
             continue
 
-        # ── 휘도 플래시: 평균 휘도 극값 추적 + 극값 대비 면적(로컬 10° 시야각) ──
-        lum_mask = harmful_luminance_mask(L_cd, last_ext_L_arr)
-        lum_area = local_area_fraction(lum_mask)
+        # ── 휘도 플래시: 극값 대비 유해 픽셀의 '방향별' 로컬 면적(10° 시야각) ──
+        # 방향까지 로컬 판정: WCAG는 플래시 '영역'의 opposing change 기준이므로
+        # 전역 평균으로 방향을 재면 국소 플래시(화면 구석)를 놓친다.
+        harmful = harmful_luminance_mask(L_cd, last_ext_L_arr)
+        up_area = local_area_fraction(harmful & (L_cd > last_ext_L_arr))
+        down_area = local_area_fraction(harmful & (L_cd < last_ext_L_arr))
+        lum_area = max(up_area, down_area)   # 같은 방향으로 변한 로컬 면적
         lum_delta = L_mean - last_ext_L_mean
         lum_mag = abs(lum_delta) / DISPLAY_PEAK_CD           # diag 변화량(0~1)
-        lum_cur_dir = 1 if lum_delta > 0 else (-1 if lum_delta < 0 else 0)
+        if up_area >= area_threshold and down_area >= area_threshold:
+            # 서로 다른 영역이 동시에 반대 방향으로 유의하게 점멸(역위상)
+            # → 어느 쪽이든 직전 방향과 반대인 전환이 존재 → 항상 opposing
+            lum_cur_dir = -lum_dir if lum_dir != 0 else 1
+        elif up_area > 0.0 or down_area > 0.0:
+            lum_cur_dir = 1 if up_area >= down_area else -1
+        else:
+            # 유해 픽셀 없음 → 전역 평균 부호로 극값 드리프트만 추적
+            lum_cur_dir = 1 if lum_delta > 0 else (-1 if lum_delta < 0 else 0)
         lum_significant = lum_area >= area_threshold
 
         lum_opposing = (

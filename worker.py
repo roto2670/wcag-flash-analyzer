@@ -146,11 +146,20 @@ class AnalysisWorker(QThread):
                 self.progress.emit(processed, total_frames // max(1, self.downsample))
                 continue
 
-            # ── 휘도 플래시 ──
-            lum_mask = harmful_luminance_mask(L_cd, last_ext_L_arr)
-            lum_area = local_area_fraction(lum_mask)
+            # ── 휘도 플래시: 방향별 로컬 면적 판정 (peat.py와 동일 로직) ──
+            harmful = harmful_luminance_mask(L_cd, last_ext_L_arr)
+            up_area = local_area_fraction(harmful & (L_cd > last_ext_L_arr))
+            down_area = local_area_fraction(harmful & (L_cd < last_ext_L_arr))
+            lum_area = max(up_area, down_area)
             lum_delta = L_mean - last_ext_L_mean
-            lum_cur_dir = 1 if lum_delta > 0 else (-1 if lum_delta < 0 else 0)
+            if up_area >= area_threshold and down_area >= area_threshold:
+                # 역위상 동시 점멸 → 항상 opposing (peat.py와 동일)
+                lum_cur_dir = -lum_dir if lum_dir != 0 else 1
+            elif up_area > 0.0 or down_area > 0.0:
+                lum_cur_dir = 1 if up_area >= down_area else -1
+            else:
+                # 유해 픽셀 없음 → 전역 평균 부호로 극값 드리프트만 추적
+                lum_cur_dir = 1 if lum_delta > 0 else (-1 if lum_delta < 0 else 0)
             lum_significant = lum_area >= area_threshold
 
             lum_opposing = (
