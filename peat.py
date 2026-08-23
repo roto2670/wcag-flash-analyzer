@@ -299,10 +299,13 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
             lum_cur_dir = 1 if lum_delta > 0 else (-1 if lum_delta < 0 else 0)
         lum_significant = lum_area >= area_threshold
 
-        lum_opposing = (
+        lum_opposing_raw = (
             lum_significant and lum_dir != 0
             and lum_cur_dir != 0 and lum_cur_dir != lum_dir
         )
+        # WCAG '동일 영역의 opposing change': 지배 박스가 근소한 차이로 뒤바뀌는
+        # 모션은 부호 지도가 유지되므로, 같은 영역이 실제 반전했을 때만 전환 인정.
+        lum_opposing = lum_opposing_raw and signs_reversed(sign_now, last_ext_sign)
         if lum_opposing and last_lum_event_t is not None and (t - last_lum_event_t) >= pace_safe:
             lum_counted = False
         else:
@@ -324,6 +327,13 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
                 last_ext_sign = sign_now
             lum_dir = lum_cur_dir
             last_lum_event_t = t
+        elif lum_opposing_raw:
+            # 반전 후보였으나 동일 영역 반전 아님(모션) → 카운트 없이 방향/극값만 전환.
+            # (상태를 갱신해야 다음 실제 반전을 놓치지 않는다)
+            last_ext_L_mean, last_ext_L_arr = L_mean, L_cd.copy()
+            if np.abs(sign_now).max() > 0.05:
+                last_ext_sign = sign_now
+            lum_dir = lum_cur_dir
         elif lum_cur_dir != 0 and (lum_dir == 0 or lum_cur_dir == lum_dir):
             last_ext_L_mean, last_ext_L_arr = L_mean, L_cd.copy()
             # 유해 변화가 있었을 때만 부호 지도 갱신 — 조용한 프레임이
@@ -354,10 +364,12 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
             red_cur_dir = 0
         red_significant = red_area >= area_threshold
 
-        red_opposing = (
+        red_opposing_raw = (
             red_significant and red_dir != 0
             and red_cur_dir != 0 and red_cur_dir != red_dir
         )
+        # 휘도와 동일: 같은 영역이 실제 반전했을 때만 전환 인정 (모션 제외)
+        red_opposing = red_opposing_raw and signs_reversed(red_sign_now, last_ext_red_sign)
         if red_opposing and last_red_event_t is not None and (t - last_red_event_t) >= pace_safe:
             red_counted = False
         else:
@@ -369,6 +381,12 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
                 last_ext_red_sign = red_sign_now
             red_dir = red_cur_dir
             last_red_event_t = t
+        elif red_opposing_raw:
+            # 동일 영역 반전 아님(모션) → 카운트 없이 방향/극값만 전환
+            last_ext_redval, last_ext_satmask = red_val.copy(), satmask.copy()
+            if np.abs(red_sign_now).max() > 0.05:
+                last_ext_red_sign = red_sign_now
+            red_dir = red_cur_dir
         elif red_cur_dir != 0 and (red_dir == 0 or red_cur_dir == red_dir):
             last_ext_redval, last_ext_satmask = red_val.copy(), satmask.copy()
             if np.abs(red_sign_now).max() > 0.05:
