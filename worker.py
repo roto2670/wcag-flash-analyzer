@@ -14,6 +14,7 @@ from peat import (
     EXTENDED_SECONDS, PATTERN_MIN_SECONDS,
     bgr_to_rgb01, linearize_srgb, luminance_cd, saturated_red_ratio,
     uv_prime, local_area_fraction, harmful_luminance_mask,
+    block_sign_map, signs_reversed,
     detect_stripe_pattern, _has_run, _rolling_mean,
 )
 from collections import deque
@@ -86,6 +87,7 @@ class AnalysisWorker(QThread):
         lum_dir = 0
         last_ext_L_mean = None
         last_ext_L_arr = None
+        last_ext_sign = None      # 직전 극값을 만든 유해 변화의 방향 블록 지도
         last_lum_event_t = None
 
         red_dir = 0
@@ -152,9 +154,13 @@ class AnalysisWorker(QThread):
             down_area = local_area_fraction(harmful & (L_cd < last_ext_L_arr))
             lum_area = max(up_area, down_area)
             lum_delta = L_mean - last_ext_L_mean
+            sign_now = block_sign_map(L_cd, last_ext_L_arr, harmful)
             if up_area >= area_threshold and down_area >= area_threshold:
-                # 역위상 동시 점멸 → 항상 opposing (peat.py와 동일)
-                lum_cur_dir = -lum_dir if lum_dir != 0 else 1
+                # 같은 영역이 실제 반전했을 때만 opposing — 모션/줌 제외 (peat.py 동일)
+                if signs_reversed(sign_now, last_ext_sign):
+                    lum_cur_dir = -lum_dir if lum_dir != 0 else 1
+                else:
+                    lum_cur_dir = 1 if up_area >= down_area else -1
             elif up_area > 0.0 or down_area > 0.0:
                 lum_cur_dir = 1 if up_area >= down_area else -1
             else:
@@ -182,10 +188,15 @@ class AnalysisWorker(QThread):
 
             if lum_opposing:
                 last_ext_L_mean, last_ext_L_arr = L_mean, L_cd.copy()
+                if np.abs(sign_now).max() > 0.05:
+                    last_ext_sign = sign_now
                 lum_dir = lum_cur_dir
                 last_lum_event_t = t
             elif lum_cur_dir != 0 and (lum_dir == 0 or lum_cur_dir == lum_dir):
                 last_ext_L_mean, last_ext_L_arr = L_mean, L_cd.copy()
+                # 유해 변화가 있었을 때만 부호 지도 갱신 (peat.py 동일)
+                if np.abs(sign_now).max() > 0.05:
+                    last_ext_sign = sign_now
                 if lum_dir == 0:
                     lum_dir = lum_cur_dir
 

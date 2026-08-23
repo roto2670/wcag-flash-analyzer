@@ -98,6 +98,25 @@ def local_area_fraction(mask):
     return float(local[y0:y0 + H - kh + 1, x0:x0 + W - kw + 1].max())
 
 
+def block_sign_map(L_cd, ext_arr, harmful, grid=(24, 32)):
+    """극값 대비 유해 변화의 방향(+1/-1) 블록 지도. WCAG의 '동일 영역'
+    opposing 판정용 — 이전 지도와 부호 상관이 음수면 같은 영역이 반전한 것."""
+    signed = np.zeros(L_cd.shape, np.float32)
+    signed[harmful] = np.sign((L_cd - ext_arr)[harmful])
+    return cv2.resize(signed, (grid[1], grid[0]), interpolation=cv2.INTER_AREA)
+
+
+def signs_reversed(s_now, s_prev):
+    """두 부호 지도가 '같은 블록에서 반대 방향'이면 True (동일 영역 반전 = 점멸).
+    모션/줌은 각 영역의 부호가 유지되어 상관이 양수 → False."""
+    if s_prev is None:
+        return False
+    overlap = (np.abs(s_now) > 0.05) & (np.abs(s_prev) > 0.05)
+    if not overlap.any():
+        return False
+    return float((s_now * s_prev)[overlap].mean()) < -0.2
+
+
 def harmful_luminance_mask(L_a, L_b):
     """
     두 휘도 상태(cd/m²) 사이 변화가 ITU-R BT.1702-3 유해 기준을 넘는 픽셀 마스크.
@@ -193,6 +212,7 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
     lum_dir = 0
     last_ext_L_mean = None
     last_ext_L_arr = None
+    last_ext_sign = None      # 직전 극값을 만든 유해 변화의 방향 블록 지도
     last_lum_event_t = None
 
     # 적색 극값 추적 상태
@@ -256,10 +276,14 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         lum_area = max(up_area, down_area)   # 같은 방향으로 변한 로컬 면적
         lum_delta = L_mean - last_ext_L_mean
         lum_mag = abs(lum_delta) / DISPLAY_PEAK_CD           # diag 변화량(0~1)
+        sign_now = block_sign_map(L_cd, last_ext_L_arr, harmful)
         if up_area >= area_threshold and down_area >= area_threshold:
-            # 서로 다른 영역이 동시에 반대 방향으로 유의하게 점멸(역위상)
-            # → 어느 쪽이든 직전 방향과 반대인 전환이 존재 → 항상 opposing
-            lum_cur_dir = -lum_dir if lum_dir != 0 else 1
+            # 양방향 동시 유의: '같은 영역이 실제 반전'(역위상 점멸)했을 때만 opposing.
+            # 모션/줌은 up/down이 공존해도 각 영역의 부호가 유지되므로 제외.
+            if signs_reversed(sign_now, last_ext_sign):
+                lum_cur_dir = -lum_dir if lum_dir != 0 else 1
+            else:
+                lum_cur_dir = 1 if up_area >= down_area else -1
         elif up_area > 0.0 or down_area > 0.0:
             lum_cur_dir = 1 if up_area >= down_area else -1
         else:
@@ -288,10 +312,16 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
 
         if lum_opposing:
             last_ext_L_mean, last_ext_L_arr = L_mean, L_cd.copy()
+            if np.abs(sign_now).max() > 0.05:
+                last_ext_sign = sign_now
             lum_dir = lum_cur_dir
             last_lum_event_t = t
         elif lum_cur_dir != 0 and (lum_dir == 0 or lum_cur_dir == lum_dir):
             last_ext_L_mean, last_ext_L_arr = L_mean, L_cd.copy()
+            # 유해 변화가 있었을 때만 부호 지도 갱신 — 조용한 프레임이
+            # 직전 점멸의 방향 기록을 지워버리지 않도록.
+            if np.abs(sign_now).max() > 0.05:
+                last_ext_sign = sign_now
             if lum_dir == 0:
                 lum_dir = lum_cur_dir
 
