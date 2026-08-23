@@ -7,7 +7,7 @@ peat.py — Harding/ITU-R BT.1702-3 기반 광과민성 발작 분석 엔진 (PE
 
 핵심 구현:
   1. cd/m² 절대 휘도 기준: ≥20 cd/m² 변화(어두운쪽 <160), 그 이상은 Michelson >1/17
-  2. 적색 플래시에 CIE 1976 UCS 색차 >0.2 조건 추가
+  2. 적색 플래시: WCAG 작업정의 — 포화적색 R/(R+G+B)≥0.8 + (R−G−B)×320 변화 >20
   3. 줄무늬(공간) 패턴 분석 추가
   4. 페이싱 면제(leading edge ≥334ms/60Hz, ≥360ms/50Hz)
 
@@ -32,7 +32,7 @@ DARK_BOUND_CD = 160.0     # 이 이상 밝으면 Michelson 대비 기준으로 �
 MICHELSON_THRESH = 1.0 / 17.0  # 어두운 상태 ≥160 cd/m²일 때 유해 대비 (≈0.0588)
 AREA_THRESHOLD = 0.25     # 플래시 면적: 전체 화면의 25% (ITU/Ofcom 기준)
 RED_RATIO_THRESH = 0.80   # 포화 적색: R/(R+G+B) ≥ 0.8
-RED_UV_DIST_THRESH = 0.20 # 적색 전환: CIE 1976 UCS (u',v') 거리 > 0.2
+RED_DELTA_THRESH = 20.0   # 적색 전환: (R−G−B)×320 변화 > 20 (WCAG 작업정의)
 WINDOW_SECONDS = 1.0      # 슬라이딩 윈도우
 FAIL_TRANSITIONS = 7      # 1초 내 방향전환 ≥7회 (= >3 flash = >6 transition)
 PACE_SAFE_60HZ = 0.334    # leading edge 간격 ≥334ms면 안전 (60Hz 환경)
@@ -69,6 +69,13 @@ def saturated_red_ratio(rgb_lin):
     """포화 적색 비율 R/(R+G+B) (선형 RGB 기준, WCAG 작업정의)"""
     R, G, B = rgb_lin[..., 0], rgb_lin[..., 1], rgb_lin[..., 2]
     return R / (R + G + B + 1e-6)
+
+
+def red_flash_value(rgb_lin):
+    """WCAG 적색 플래시 작업정의의 적색도: (R−G−B)×320, 음수는 0.
+    두 상태 간 이 값의 변화가 RED_DELTA_THRESH(20)를 넘으면 적색 전환."""
+    v = rgb_lin[..., 0] - rgb_lin[..., 1] - rgb_lin[..., 2]
+    return np.clip(v, 0.0, None) * 320.0
 
 
 def uv_prime(rgb_lin):
@@ -217,8 +224,9 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
 
     # 적색 극값 추적 상태
     red_dir = 0
-    last_ext_uv = None
+    last_ext_redval = None    # 극값 상태의 (R−G−B)×320 지도
     last_ext_satmask = None
+    last_ext_red_sign = None  # 직전 적색 극값을 만든 변화의 방향 블록 지도
     last_red_event_t = None
 
     prev_L_cd = None
@@ -240,7 +248,7 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         L_cd = luminance_cd(rgb_lin)
         sat_ratio = saturated_red_ratio(rgb_lin)
         satmask = sat_ratio >= RED_RATIO_THRESH
-        uv = uv_prime(rgb_lin)
+        red_val = red_flash_value(rgb_lin)
         L_mean = float(L_cd.mean())
         t = processed / effective_fps
 
@@ -261,7 +269,7 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
             pattern_flags.append(False)
             last_ext_L_mean = L_mean
             last_ext_L_arr = L_cd.copy()
-            last_ext_uv = uv.copy()
+            last_ext_redval = red_val.copy()
             last_ext_satmask = satmask.copy()
             prev_L_cd = L_cd
             processed += 1
@@ -325,25 +333,23 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
             if lum_dir == 0:
                 lum_dir = lum_cur_dir
 
-        # ── 적색 플래시: 포화적색 AND UCS 색차 >0.2 전환 면적 ──
-        # 방향 판단: 적색 마스크 면적이 아닌, 포화적색 영역의 평균 UCS 색차 방향으로 판단.
-        # 적색 상태 진입(비적색→적색) = +1, 이탈(적색→비적색) = -1.
-        # 이렇게 해야 면적 동일 + 색상만 바뀌는 경우도 올바르게 포착.
-        uv_dist = np.sqrt(((uv - last_ext_uv) ** 2).sum(axis=-1))
-        red_transition_mask = (satmask | last_ext_satmask) & (uv_dist > RED_UV_DIST_THRESH)
-        red_area = local_area_fraction(red_transition_mask)
-        # 방향: 현재 포화적색 면적 vs 이전 극값의 포화적색 면적
-        # 추가로, 면적이 동일하더라도 UCS 색차가 크면 "전환"으로 봄
-        curr_sat_area = float(satmask.mean())
-        prev_sat_area = float(last_ext_satmask.mean())
-        sat_area_delta = curr_sat_area - prev_sat_area
-        # 면적 차이가 유의미하면 면적 기반 방향, 아니면 색차 존재 여부로 방향 결정
-        if abs(sat_area_delta) > 0.02:
-            red_cur_dir = 1 if sat_area_delta > 0 else -1
-        elif red_area >= area_threshold:
-            # 면적 차이 미미하지만 UCS 색차 큼 → 색상 전환 발생
-            # 이전 방향과 반대로 간주 (적색↔다른색 반복 패턴)
-            red_cur_dir = -red_dir if red_dir != 0 else 1
+        # ── 적색 플래시: WCAG 작업정의 ──
+        # 한쪽 상태가 포화적색(R/(R+G+B)≥0.8)이고 (R−G−B)×320 변화 >20인 픽셀을
+        # '적색으로 진입(+)/이탈(−)' 방향별 로컬 면적으로 판정 (휘도와 동일 구조).
+        red_dv = red_val - last_ext_redval
+        red_trans_mask = (satmask | last_ext_satmask) & (np.abs(red_dv) > RED_DELTA_THRESH)
+        red_up_area = local_area_fraction(red_trans_mask & (red_dv > 0))
+        red_down_area = local_area_fraction(red_trans_mask & (red_dv < 0))
+        red_area = max(red_up_area, red_down_area)
+        red_sign_now = block_sign_map(red_val, last_ext_redval, red_trans_mask)
+        if red_up_area >= area_threshold and red_down_area >= area_threshold:
+            # 양방향 동시 유의: 같은 영역이 실제 반전했을 때만 opposing (휘도와 동일)
+            if signs_reversed(red_sign_now, last_ext_red_sign):
+                red_cur_dir = -red_dir if red_dir != 0 else 1
+            else:
+                red_cur_dir = 1 if red_up_area >= red_down_area else -1
+        elif red_up_area > 0.0 or red_down_area > 0.0:
+            red_cur_dir = 1 if red_up_area >= red_down_area else -1
         else:
             red_cur_dir = 0
         red_significant = red_area >= area_threshold
@@ -358,11 +364,15 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
             red_counted = red_opposing
 
         if red_opposing:
-            last_ext_uv, last_ext_satmask = uv.copy(), satmask.copy()
+            last_ext_redval, last_ext_satmask = red_val.copy(), satmask.copy()
+            if np.abs(red_sign_now).max() > 0.05:
+                last_ext_red_sign = red_sign_now
             red_dir = red_cur_dir
             last_red_event_t = t
         elif red_cur_dir != 0 and (red_dir == 0 or red_cur_dir == red_dir):
-            last_ext_uv, last_ext_satmask = uv.copy(), satmask.copy()
+            last_ext_redval, last_ext_satmask = red_val.copy(), satmask.copy()
+            if np.abs(red_sign_now).max() > 0.05:
+                last_ext_red_sign = red_sign_now
             if red_dir == 0:
                 red_dir = red_cur_dir
 

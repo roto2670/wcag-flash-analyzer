@@ -9,11 +9,11 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from peat import (
     DISPLAY_PEAK_CD, FLASH_DELTA_CD, DARK_BOUND_CD, MICHELSON_THRESH,
-    AREA_THRESHOLD, RED_RATIO_THRESH, RED_UV_DIST_THRESH,
+    AREA_THRESHOLD, RED_RATIO_THRESH, RED_DELTA_THRESH,
     WINDOW_SECONDS, FAIL_TRANSITIONS, PACE_SAFE_60HZ, PACE_SAFE_50HZ,
     EXTENDED_SECONDS, PATTERN_MIN_SECONDS,
     bgr_to_rgb01, linearize_srgb, luminance_cd, saturated_red_ratio,
-    uv_prime, local_area_fraction, harmful_luminance_mask,
+    red_flash_value, local_area_fraction, harmful_luminance_mask,
     block_sign_map, signs_reversed,
     detect_stripe_pattern, _has_run, _rolling_mean,
 )
@@ -91,8 +91,9 @@ class AnalysisWorker(QThread):
         last_lum_event_t = None
 
         red_dir = 0
-        last_ext_uv = None
+        last_ext_redval = None    # 극값 상태의 (R−G−B)×320 지도
         last_ext_satmask = None
+        last_ext_red_sign = None  # 직전 적색 극값을 만든 변화의 방향 블록 지도
         last_red_event_t = None
 
         prev_L_cd = None
@@ -122,7 +123,7 @@ class AnalysisWorker(QThread):
             L_cd = luminance_cd(rgb_lin)
             sat_ratio = saturated_red_ratio(rgb_lin)
             satmask = sat_ratio >= RED_RATIO_THRESH
-            uv = uv_prime(rgb_lin)
+            red_val = red_flash_value(rgb_lin)
             L_mean = float(L_cd.mean())
             t = processed / effective_fps
 
@@ -137,7 +138,7 @@ class AnalysisWorker(QThread):
                 pattern_flags.append(False)
                 last_ext_L_mean = L_mean
                 last_ext_L_arr = L_cd.copy()
-                last_ext_uv = uv.copy()
+                last_ext_redval = red_val.copy()
                 last_ext_satmask = satmask.copy()
                 prev_L_cd = L_cd
 
@@ -200,18 +201,20 @@ class AnalysisWorker(QThread):
                 if lum_dir == 0:
                     lum_dir = lum_cur_dir
 
-            # ── 적색 플래시 ──
-            uv_dist = np.sqrt(((uv - last_ext_uv) ** 2).sum(axis=-1))
-            red_transition_mask = (satmask | last_ext_satmask) & (uv_dist > RED_UV_DIST_THRESH)
-            red_area = local_area_fraction(red_transition_mask)
-
-            curr_sat_area = float(satmask.mean())
-            prev_sat_area = float(last_ext_satmask.mean())
-            sat_area_delta = curr_sat_area - prev_sat_area
-            if abs(sat_area_delta) > 0.02:
-                red_cur_dir = 1 if sat_area_delta > 0 else -1
-            elif red_area >= area_threshold:
-                red_cur_dir = -red_dir if red_dir != 0 else 1
+            # ── 적색 플래시: WCAG 작업정의 (peat.py와 동일 로직) ──
+            red_dv = red_val - last_ext_redval
+            red_trans_mask = (satmask | last_ext_satmask) & (np.abs(red_dv) > RED_DELTA_THRESH)
+            red_up_area = local_area_fraction(red_trans_mask & (red_dv > 0))
+            red_down_area = local_area_fraction(red_trans_mask & (red_dv < 0))
+            red_area = max(red_up_area, red_down_area)
+            red_sign_now = block_sign_map(red_val, last_ext_redval, red_trans_mask)
+            if red_up_area >= area_threshold and red_down_area >= area_threshold:
+                if signs_reversed(red_sign_now, last_ext_red_sign):
+                    red_cur_dir = -red_dir if red_dir != 0 else 1
+                else:
+                    red_cur_dir = 1 if red_up_area >= red_down_area else -1
+            elif red_up_area > 0.0 or red_down_area > 0.0:
+                red_cur_dir = 1 if red_up_area >= red_down_area else -1
             else:
                 red_cur_dir = 0
             red_significant = red_area >= area_threshold
@@ -226,11 +229,15 @@ class AnalysisWorker(QThread):
                 red_counted = red_opposing
 
             if red_opposing:
-                last_ext_uv, last_ext_satmask = uv.copy(), satmask.copy()
+                last_ext_redval, last_ext_satmask = red_val.copy(), satmask.copy()
+                if np.abs(red_sign_now).max() > 0.05:
+                    last_ext_red_sign = red_sign_now
                 red_dir = red_cur_dir
                 last_red_event_t = t
             elif red_cur_dir != 0 and (red_dir == 0 or red_cur_dir == red_dir):
-                last_ext_uv, last_ext_satmask = uv.copy(), satmask.copy()
+                last_ext_redval, last_ext_satmask = red_val.copy(), satmask.copy()
+                if np.abs(red_sign_now).max() > 0.05:
+                    last_ext_red_sign = red_sign_now
                 if red_dir == 0:
                     red_dir = red_cur_dir
 

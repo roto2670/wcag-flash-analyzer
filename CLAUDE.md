@@ -8,7 +8,7 @@ WCAG 2.3.1 비디오 플래시 분석 도구 — PEAT(Photosensitive Epilepsy An
 
 구성:
 
-- **`peat.py`** — 분석 엔진 + CLI. Harding/ITU-R BT.1702-3 충실 재구현. cd/m² 절대 휘도 기준, 적색 UCS 색차, 줄무늬 패턴 분석, 페이싱 면제, 장면전환(scene cut) 제외까지 포함.
+- **`peat.py`** — 분석 엔진 + CLI. Harding/ITU-R BT.1702-3 충실 재구현. cd/m² 절대 휘도 기준, 적색 WCAG 작업정의 공식, 줄무늬 패턴 분석, 페이싱 면제, 장면전환(scene cut) 제외까지 포함.
 - **`gui.py`** — PyQt5 + pyqtgraph 데스크탑 앱(`PEATMainWindow`). 실시간 차트, 4단계 판정 표시, YouTube URL 다운로드 분석(yt-dlp), 드래그앤드롭, PNG/PDF 내보내기, FAIL 구간 클릭/차트 클릭 → 프레임 미리보기, 좌우 방향키 1프레임 이동.
 - **`worker.py`** — `AnalysisWorker(QThread)`. 프레임 단위 분석을 백그라운드에서 수행하며 시그널(`progress`/`frame_result`/`finished`/`error`)로 GUI에 전달.
 - **`build.sh`** — Nuitka standalone/onefile 빌드 스크립트 (macOS/Windows/Linux 분기).
@@ -60,7 +60,7 @@ python peat.py --video ./temp/<영상파일> --no_show  # 그래프 없이 콘�
    - ※ 전체 화면 25%가 아니라 로컬 영역 25% — WCAG "10° 시야각" 기준이라 국소 플래시 포착. 방향도 로컬(방향별 면적) 기준 — 전역 평균 방향은 화면 구석의 국소 플래시를 놓침(test-2에서 수정됨).
    - 유해 전환 = `harmful_luminance_mask`: 어두운쪽 <160 cd/m²면 차이 ≥**20 cd/m²**, ≥160 cd/m²면 **Michelson 대비 ≥1/17**.
    - **장면전환 제외**: 직전 프레임 대비 로컬 면적 >0.7 급변이 1초 내 ≤2회로 '고립'되면 scene cut으로 보고 카운트 제외. 반복 점멸(급변 다수)은 유지.
-2. **적색 플래시**: `R/(R+G+B) ≥ 0.8`(포화 적색) **AND** 두 상태의 **CIE 1976 UCS (u',v') 거리 > 0.2**인 픽셀이 로컬 면적 ≥25%일 때 전환 카운트. 방향은 포화적색 면적 변화(Δ>0.02)로 판단하되, 면적이 같아도 UCS 색차가 크면 이전 방향의 반대로 간주(색상만 반복되는 패턴 포착).
+2. **적색 플래시**: WCAG 작업정의 — 한쪽 상태가 `R/(R+G+B) ≥ 0.8`(포화 적색) **AND** `(R−G−B)×320` 변화 > **20**(`red_flash_value`, 음수는 0)인 픽셀을 적색 **진입(+)/이탈(−) 방향별 로컬 면적**으로 판정 — 휘도와 동일 구조(지배 방향, 양방향 동시 유의 시 `signs_reversed` 동일 영역 반전 검사). 휘도와 독립된 방향/윈도우 추적.
 3. **줄무늬 패턴**: `detect_stripe_pattern` — 행/열 평균 프로파일 FFT로 지배 주파수 검출. **>5 광-암 쌍** + 광-암차 ≥20 cd/m² + 최고휘도 >50 cd/m²이면 패턴 후보, **≥0.5초 지속** 시 FAIL.
 4. **전환 카운트**: 1초 슬라이딩 윈도우 내 휘도/적색 각각 전환 수. **페이싱 면제**: leading edge 간격 ≥334ms(60Hz)/≥360ms(50Hz) 전환은 안전으로 보고 누적 제외.
 5. **Extended Flash**(`extended_series`): 5초 윈도우의 80% 프레임에서 실패의 1/3(=전환 `FAIL_TRANSITIONS//3`) 이상 플래시가 지속되는 정도(0~1). 공식 PEAT 그래프의 파란 계단선.
@@ -88,7 +88,7 @@ python peat.py --video ./temp/<영상파일> --no_show  # 그래프 없이 콘�
 
 ### 핵심 상수 (`peat.py` 상단)
 
-`DISPLAY_PEAK_CD=200`, `FLASH_DELTA_CD=20`, `DARK_BOUND_CD=160`, `MICHELSON_THRESH=1/17`, `AREA_THRESHOLD=0.25`(로컬 10° 시야각 영역의 25%), `RED_RATIO_THRESH=0.80`, `RED_UV_DIST_THRESH=0.20`, `FAIL_TRANSITIONS=7`, `PATTERN_MIN_PAIRS=5`, `EXTENDED_SECONDS=5.0`, `PATTERN_MIN_SECONDS=0.5`.
+`DISPLAY_PEAK_CD=200`, `FLASH_DELTA_CD=20`, `DARK_BOUND_CD=160`, `MICHELSON_THRESH=1/17`, `AREA_THRESHOLD=0.25`(로컬 10° 시야각 영역의 25%), `RED_RATIO_THRESH=0.80`, `RED_DELTA_THRESH=20`, `FAIL_TRANSITIONS=7`, `PATTERN_MIN_PAIRS=5`, `EXTENDED_SECONDS=5.0`, `PATTERN_MIN_SECONDS=0.5`.
 
 ### 알려진 근사/한계
 
