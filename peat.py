@@ -115,13 +115,24 @@ def block_sign_map(L_cd, ext_arr, harmful, grid=(24, 32)):
 
 def signs_reversed(s_now, s_prev):
     """두 부호 지도가 '같은 블록에서 반대 방향'이면 True (동일 영역 반전 = 점멸).
-    모션/줌은 각 영역의 부호가 유지되어 상관이 양수 → False."""
+    모션/줌은 각 영역의 부호가 유지되어 상관이 양수 → False.
+
+    겹치는 블록이 없으면(플래시 영역이 프레임 사이에 이동/점프한 경우) 각 지도의
+    지배 부호로 판정: 점멸은 각 지도가 한 방향으로 치우치고 서로 반대다
+    (예: A영역 소등 → B영역 점등, 교차 스트로브). 모션은 상승(전연)/하강(후연)
+    블록이 한 지도 안에 섞여 지배 부호가 약하므로 여전히 False."""
     if s_prev is None:
         return False
-    overlap = (np.abs(s_now) > 0.05) & (np.abs(s_prev) > 0.05)
-    if not overlap.any():
+    act_now = np.abs(s_now) > 0.05
+    act_prev = np.abs(s_prev) > 0.05
+    overlap = act_now & act_prev
+    if overlap.any():
+        return float((s_now * s_prev)[overlap].mean()) < -0.2
+    if not act_now.any() or not act_prev.any():
         return False
-    return float((s_now * s_prev)[overlap].mean()) < -0.2
+    m_now = float(s_now[act_now].mean())
+    m_prev = float(s_prev[act_prev].mean())
+    return m_now * m_prev < -0.36  # 양쪽 지배 부호 |m|≈0.6 이상 & 서로 반대
 
 
 def harmful_luminance_mask(L_a, L_b):
