@@ -16,9 +16,17 @@
 #       --include-module=cv2 --include-module=numpy \
 #       --include-module=pyqtgraph --include-module=peat \
 #       --include-module=worker \
+#       --noinclude-custom-mode=yt_dlp:bytecode \
 #       --windows-console-mode=disable \
 #       --output-filename=PEAT_Analyzer.exe \
 #       gui.py
+#
+# ※ yt_dlp는 반드시 bytecode로 포함할 것 (--noinclude-custom-mode=yt_dlp:bytecode).
+#   C 컴파일하면 사이트별 추출기 ~1800개 모듈이 전부 컴파일 대상이 되어 빌드가
+#   수 분씩 걸리고, 초대형 생성 파일인 lazy_extractors에서 컴파일러 OOM으로
+#   빌드가 실패한다. exe 안에서는 subprocess 경로(sys.executable -m yt_dlp)가
+#   동작하지 않아 항상 라이브러리 폴백을 타므로, 완전히 빼면(-nofollow-import-to)
+#   YouTube 다운로드 기능이 죽는다.
 # ──────────────────────────────────────────────────────────────────
 
 set -e
@@ -56,6 +64,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
         --include-module=pyqtgraph \
         --include-module=peat \
         --include-module=worker \
+        --noinclude-custom-mode=yt_dlp:bytecode \
         --macos-create-app-bundle \
         --macos-app-name="PEAT Analyzer" \
         --output-filename=PEAT_Analyzer \
@@ -77,6 +86,7 @@ elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "win32" ]] || [[ "$OSTYPE" == 
         --include-module=pyqtgraph \
         --include-module=peat \
         --include-module=worker \
+        --noinclude-custom-mode=yt_dlp:bytecode \
         --windows-console-mode=disable \
         --output-filename=PEAT_Analyzer.exe \
         gui.py
@@ -97,6 +107,7 @@ else
         --include-module=pyqtgraph \
         --include-module=peat \
         --include-module=worker \
+        --noinclude-custom-mode=yt_dlp:bytecode \
         --output-filename=PEAT_Analyzer \
         gui.py
 
