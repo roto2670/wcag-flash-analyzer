@@ -29,6 +29,9 @@ from collections import deque
 DISPLAY_PEAK_CD = 200.0   # SDR 기준 백색 휘도 가정 (ITU). 상대휘도 1.0 = 200 cd/m²
 FLASH_DELTA_CD = 20.0     # 유해 휘도 변화 임계 (어두운 상태 < 160 cd/m²일 때)
 DARK_BOUND_CD = 160.0     # 이 이상 밝으면 Michelson 대비 기준으로 전환
+# ※ 상수 커플링: 20/200=10%(변화), 160/200=0.8(어두운쪽 경계)이 WCAG의 상대휘도
+#   기준과 정확히 대응한다. DISPLAY_PEAK_CD를 바꾸면 FLASH_DELTA_CD와
+#   DARK_BOUND_CD도 같은 비율로 함께 조정해야 WCAG 등가가 유지된다.
 MICHELSON_THRESH = 1.0 / 17.0  # 어두운 상태 ≥160 cd/m²일 때 유해 대비 (≈0.0588)
 AREA_THRESHOLD = 0.25     # 플래시 면적: 전체 화면의 25% (ITU/Ofcom 기준)
 RED_RATIO_THRESH = 0.80   # 포화 적색: R/(R+G+B) ≥ 0.8
@@ -72,8 +75,14 @@ def saturated_red_ratio(rgb_lin):
 
 
 def red_flash_value(rgb_lin):
-    """WCAG 적색 플래시 작업정의의 적색도: (R−G−B)×320, 음수는 0.
-    두 상태 간 이 값의 변화가 RED_DELTA_THRESH(20)를 넘으면 적색 전환."""
+    """WCAG 적색 플래시 작업정의(2.0 시대, PEAT 구현 기준)의 적색도: (R−G−B)×320,
+    음수는 0. 두 상태 간 이 값의 변화가 RED_DELTA_THRESH(20)를 넘으면 적색 전환.
+
+    색공간 검증(2026-08): W3C 원문이 "R, G, B values range from 0-1 as specified
+    in 'relative luminance' definition"이라 명시 — 상대 휘도 정의의 R,G,B는
+    선형화(감마 제거) 값이므로 이 함수가 rgb_lin(선형)을 받는 것이 표준 그대로다.
+    ※ WCAG 2.1/2.2 Understanding의 2022년 '새 작업정의'는 CIE 1976 UCS 색차
+    >0.2 방식이지만, 공식 PEAT는 ×320 방식을 구현하므로 PEAT 재현 목표상 이쪽을 따른다."""
     v = rgb_lin[..., 0] - rgb_lin[..., 1] - rgb_lin[..., 2]
     return np.clip(v, 0.0, None) * 320.0
 
@@ -137,9 +146,11 @@ def signs_reversed(s_now, s_prev):
 
 def harmful_luminance_mask(L_a, L_b):
     """
-    두 휘도 상태(cd/m²) 사이 변화가 ITU-R BT.1702-3 유해 기준을 넘는 픽셀 마스크.
-      - 어두운 쪽 < 160 cd/m²: 차이 ≥ 20 cd/m²
-      - 어두운 쪽 ≥ 160 cd/m²: Michelson 대비 ≥ 1/17
+    두 휘도 상태(cd/m²) 사이 변화가 유해 기준을 넘는 픽셀 마스크.
+      - 어두운 쪽 < 160 cd/m²: 차이 ≥ 20 cd/m² (ITU-R BT.1702-3 / WCAG 동일)
+      - 어두운 쪽 ≥ 160 cd/m²: Michelson 대비 ≥ 1/17 — **의도적 보수성(표준 초과)**.
+        WCAG/ITU는 어두운 쪽이 상대휘도 0.8(=160 cd/m²) 이상이면 완전 면제하지만,
+        고휘도 대비 점멸도 잡도록 Michelson 기준을 유지한다 (위양성 방향으로만 작용).
     """
     darker = np.minimum(L_a, L_b)
     brighter = np.maximum(L_a, L_b)
@@ -163,7 +174,8 @@ def _stripe_axis(profile):
         return 0, 0.0, 0.0
     sig = profile - profile.mean()
     spec = np.abs(np.fft.rfft(sig))
-    # DC와 초저주파(전역 그라데이션) 제외, 최소 6 사이클부터 패턴으로 간주
+    # DC·초저주파(전역 그라데이션, <3 사이클) 제외하고 지배 주파수를 3 사이클부터
+    # 탐색. 유해 여부의 최종 기준은 detect_stripe_pattern의 pairs > PATTERN_MIN_PAIRS(5).
     if len(spec) <= 6:
         return 0, 0.0, 0.0
     k = int(np.argmax(spec[3:]) + 3)  # 지배 주파수 인덱스 = 사이클 수
@@ -558,8 +570,10 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
     lum_max = int(lum_window.max()) if len(lum_window) else 0
     red_max = int(red_window.max()) if len(red_window) else 0
     flash_max = max(lum_max, red_max)
-    wcag_fail = lum_fail or red_fail or pattern_fail
-    if wcag_fail:
+    # WCAG 2.3.1은 플래시(휘도/적색)만 다룬다 — 줄무늬 패턴은 Harding/Ofcom 기준이므로
+    # wcag_2_3_1_fail에서는 제외하고 종합 판정(verdict)에만 반영한다.
+    wcag_fail = lum_fail or red_fail
+    if wcag_fail or pattern_fail:
         verdict = "FAIL"
     elif extended_warn or flash_max >= FAIL_TRANSITIONS - 1:
         verdict = "CAUTION (FAIL)"          # pass/fail 라인 직전 — 위험 경고
@@ -752,6 +766,10 @@ def main():
     ap.add_argument("--no_pattern", action="store_true", help="줄무늬 패턴 분석 비활성화")
     ap.add_argument("--no_show", action="store_true", help="그래프 창 없이 요약만 출력")
     args = ap.parse_args()
+
+    if args.downsample > 1:
+        print(f"[!] --downsample {args.downsample}: 유효 fps가 1/{args.downsample}로 줄어 "
+              f"그보다 빠른 점멸은 감지되지 않을 수 있습니다 (나이퀴스트 한계).")
 
     metrics = analyze_video(
         args.video,
