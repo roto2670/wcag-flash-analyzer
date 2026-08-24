@@ -193,15 +193,28 @@ def detect_stripe_pattern(L_cd, moving):
 # ──────────────────────────────────────────────────────────────────────────
 def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
                   window_seconds=WINDOW_SECONDS, downsample=1, max_frames=0,
-                  enable_pattern=True):
+                  enable_pattern=True, on_frame=None, should_stop=None):
+    """비디오 전체를 분석하고 metrics(dict)를 반환한다. GUI/CLI 공용 단일 소스.
+
+    on_frame(dict): 프레임 하나 처리할 때마다 호출 — 실시간 차트용
+        (time/processed/total/lum_area/red_area/sat_area/
+         lum_window_count/red_window_count/pattern_hit/lum_opposing/red_opposing)
+    should_stop() -> bool: 매 프레임 전에 호출, True면 중단하고 None 반환
+    """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        raise RuntimeError(f"Could not open video: {video_path}")
+        raise RuntimeError(f"영상을 열 수 없습니다: {video_path}")
 
     fps = cap.get(cv2.CAP_PROP_FPS)
     fps = fps if fps > 0 else 30.0
     effective_fps = fps / max(1, downsample)
     pace_safe = PACE_SAFE_50HZ if fps <= 55 else PACE_SAFE_60HZ
+    window_frames = max(1, int(round(window_seconds * effective_fps)))
+
+    # 진행률 표시용 총 처리 프레임 수 (추정)
+    total_proc = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) // max(1, downsample)
+    if max_frames > 0:
+        total_proc = min(total_proc, max_frames)
 
     # 누적 시계열
     times = []
@@ -221,6 +234,9 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
     last_ext_L_arr = None
     last_ext_sign = None      # 직전 극값을 만든 유해 변화의 방향 블록 지도
     last_lum_event_t = None
+    lum_pending_idx = None    # 페이싱 잠정 면제 이벤트의 flags 인덱스 (소급 카운트용)
+    last_lum_sig_t = None     # 마지막 유의(면적≥임계) 변화 시각 — 버스트 시작 판정용
+    lum_cut_pending = []      # 장면전환 잠정 제외 (flags 인덱스, 시각) — 반복 점멸 판명 시 복원
 
     # 적색 극값 추적 상태
     red_dir = 0
@@ -228,6 +244,8 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
     last_ext_satmask = None
     last_ext_red_sign = None  # 직전 적색 극값을 만든 변화의 방향 블록 지도
     last_red_event_t = None
+    red_pending_idx = None    # 페이싱 잠정 면제 이벤트의 flags 인덱스 (소급 카운트용)
+    last_red_sig_t = None     # 마지막 유의 적색 변화 시각 — 버스트 시작 판정용
 
     prev_L_cd = None
     consec_big_times = deque()  # 직전 프레임 대비 화면 급변(장면전환 후보) 시각들
@@ -235,6 +253,9 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
     frame_idx = -1
 
     while True:
+        if should_stop is not None and should_stop():
+            cap.release()
+            return None
         ret, frame = cap.read()
         if not ret:
             break
@@ -273,6 +294,15 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
             last_ext_satmask = satmask.copy()
             prev_L_cd = L_cd
             processed += 1
+            if on_frame is not None:
+                on_frame({
+                    "time": t, "processed": processed, "total": total_proc,
+                    "lum_area": 0.0, "red_area": 0.0,
+                    "sat_area": sat_area_series[-1],
+                    "lum_window_count": 0, "red_window_count": 0,
+                    "pattern_hit": False,
+                    "lum_opposing": False, "red_opposing": False,
+                })
             continue
 
         # ── 휘도 플래시: 극값 대비 유해 픽셀의 '방향별' 로컬 면적(10° 시야각) ──
@@ -305,21 +335,53 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         )
         # WCAG '동일 영역의 opposing change': 지배 박스가 근소한 차이로 뒤바뀌는
         # 모션은 부호 지도가 유지되므로, 같은 영역이 실제 반전했을 때만 전환 인정.
-        lum_opposing = lum_opposing_raw and signs_reversed(sign_now, last_ext_sign)
-        if lum_opposing and last_lum_event_t is not None and (t - last_lum_event_t) >= pace_safe:
-            lum_counted = False
-        else:
-            lum_counted = lum_opposing
+        # 버스트 시작 보정: 1초 이상 유의 변화가 없다가 나타난 첫 유의 전환도 1회로
+        # 카운트 — 반전만 세면 물리 전환 N회가 N−1회로 집계되는 오프바이원이 생겨
+        # Harding 관행(1초 내 전환 ≥7회 FAIL)보다 한 단계 관대해진다.
+        lum_burst_start = (
+            lum_significant and lum_cur_dir != 0
+            and (last_lum_sig_t is None or (t - last_lum_sig_t) > window_seconds)
+        )
+        lum_opposing = (lum_opposing_raw and signs_reversed(sign_now, last_ext_sign)) \
+            or lum_burst_start
+        if lum_significant:
+            last_lum_sig_t = t
+        lum_counted = lum_opposing
+
+        # 페이싱 면제 (장면전환 검사보다 먼저): 앞뒤 간격이 모두 pace_safe 이상인
+        # '고립' 이벤트만 안전 면제. WCAG는 1초 윈도우 내 플래시 수만 보므로 개별
+        # 간격 면제는 저속 점멸에만 해당한다. 뒤 간격은 아직 모르므로 잠정 면제하고,
+        # 다음 이벤트가 pace_safe 안에 오면 소급하여 카운트로 되돌린다.
+        # ※ 순서 중요: 장면전환 소급 복원은 '페이싱을 통과한' 이벤트만 대상으로
+        #   해야 저속 점멸이 복원 경로로 면제를 우회하지 않는다.
+        if lum_counted:
+            gap = None if last_lum_event_t is None else (t - last_lum_event_t)
+            if gap is None or gap >= pace_safe:
+                lum_counted = False
+                lum_pending_idx = len(lum_event_flags)  # 이번 프레임이 받을 인덱스
+            else:
+                if lum_pending_idx is not None:
+                    lum_event_flags[lum_pending_idx] = True
+                lum_pending_idx = None
 
         # 장면 전환(scene cut) 제외: 직전 프레임 대비 화면 급변이 1초 내 '고립'(≤2회)이면
-        # 광과민 플래시가 아닌 컷으로 보고 카운트 제외. 반복 점멸(많은 급변)은 유지.
+        # 컷으로 보고 잠정 제외. 급변이 1초 내 3회 이상으로 늘어나면 반복 점멸로
+        # 판명되므로 잠정 제외분을 소급 복원한다 (버스트 초반 1~2 전환 누락 방지).
         consec_area = local_area_fraction(harmful_luminance_mask(L_cd, prev_L_cd))
         if consec_area > 0.7:
             consec_big_times.append(t)
         while consec_big_times and (t - consec_big_times[0]) > 1.0:
             consec_big_times.popleft()
-        if consec_area > 0.7 and len(consec_big_times) <= 2:
-            lum_counted = False
+        lum_cut_pending = [(i, tt) for (i, tt) in lum_cut_pending if (t - tt) <= 1.0]
+        if consec_area > 0.7:
+            if len(consec_big_times) <= 2:
+                if lum_counted:
+                    lum_cut_pending.append((len(lum_event_flags), t))
+                    lum_counted = False
+            else:
+                for i, _tt in lum_cut_pending:
+                    lum_event_flags[i] = True
+                lum_cut_pending = []
 
         if lum_opposing:
             last_ext_L_mean, last_ext_L_arr = L_mean, L_cd.copy()
@@ -369,11 +431,26 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
             and red_cur_dir != 0 and red_cur_dir != red_dir
         )
         # 휘도와 동일: 같은 영역이 실제 반전했을 때만 전환 인정 (모션 제외)
-        red_opposing = red_opposing_raw and signs_reversed(red_sign_now, last_ext_red_sign)
-        if red_opposing and last_red_event_t is not None and (t - last_red_event_t) >= pace_safe:
-            red_counted = False
-        else:
-            red_counted = red_opposing
+        # + 버스트 시작 보정(오프바이원): 1초 이상 조용하다 나타난 첫 유의 전환도 카운트
+        red_burst_start = (
+            red_significant and red_cur_dir != 0
+            and (last_red_sig_t is None or (t - last_red_sig_t) > window_seconds)
+        )
+        red_opposing = (red_opposing_raw and signs_reversed(red_sign_now, last_ext_red_sign)) \
+            or red_burst_start
+        if red_significant:
+            last_red_sig_t = t
+        red_counted = red_opposing
+        # 페이싱 면제: 휘도와 동일 — 고립 이벤트만 잠정 면제 + 소급 카운트
+        if red_counted:
+            gap = None if last_red_event_t is None else (t - last_red_event_t)
+            if gap is None or gap >= pace_safe:
+                red_counted = False
+                red_pending_idx = len(red_event_flags)
+            else:
+                if red_pending_idx is not None:
+                    red_event_flags[red_pending_idx] = True
+                red_pending_idx = None
 
         if red_opposing:
             last_ext_redval, last_ext_satmask = red_val.copy(), satmask.copy()
@@ -413,13 +490,25 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         prev_L_cd = L_cd
         processed += 1
 
+        if on_frame is not None:
+            # 실시간 1초 윈도우 카운트 — 페이싱 소급 카운트 반영 위해 flags 꼬리 합산
+            on_frame({
+                "time": t, "processed": processed, "total": total_proc,
+                "lum_area": lum_area, "red_area": red_area,
+                "sat_area": sat_area_series[-1],
+                "lum_window_count": int(np.count_nonzero(lum_event_flags[-window_frames:])),
+                "red_window_count": int(np.count_nonzero(red_event_flags[-window_frames:])),
+                "pattern_hit": pattern_hit,
+                "lum_opposing": lum_counted,
+                "red_opposing": red_counted,
+            })
+
     cap.release()
 
     # ── 1초 슬라이딩 윈도우 방향전환 카운트 ──
     lum_flags = np.array(lum_event_flags, dtype=bool)
     red_flags = np.array(red_event_flags, dtype=bool)
     pattern_arr = np.array(pattern_flags, dtype=bool)
-    window_frames = max(1, int(round(window_seconds * effective_fps)))
 
     def windowed_count(flags):
         out = np.zeros(len(flags), dtype=np.int32)
