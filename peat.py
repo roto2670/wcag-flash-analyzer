@@ -322,11 +322,15 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         harmful = harmful_luminance_mask(L_cd, last_ext_L_arr)
         up_area = local_area_fraction(harmful & (L_cd > last_ext_L_arr))
         down_area = local_area_fraction(harmful & (L_cd < last_ext_L_arr))
-        lum_area = max(up_area, down_area)   # 같은 방향으로 변한 로컬 면적
+        # WCAG: '동시 발생 플래시의 결합 면적'이 10° 시야각의 25% 초과 — 방향별
+        # max가 아니라 결합(전체 유해) 면적으로 유의성 판정. 역위상 점멸
+        # (A 밝아짐 + B 어두워짐 동시)은 방향별로는 25% 미만일 수 있다.
+        lum_area = local_area_fraction(harmful)
         lum_delta = L_mean - last_ext_L_mean
         lum_mag = abs(lum_delta) / DISPLAY_PEAK_CD           # diag 변화량(0~1)
         sign_now = block_sign_map(L_cd, last_ext_L_arr, harmful)
-        if up_area >= area_threshold and down_area >= area_threshold:
+        if (up_area >= area_threshold * 0.5 and down_area >= area_threshold * 0.5
+                and lum_area >= area_threshold):
             # 양방향 동시 유의: '같은 영역이 실제 반전'(역위상 점멸)했을 때만 opposing.
             # 모션/줌은 up/down이 공존해도 각 영역의 부호가 유지되므로 제외.
             if signs_reversed(sign_now, last_ext_sign):
@@ -423,9 +427,10 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         red_trans_mask = (satmask | last_ext_satmask) & (np.abs(red_dv) > RED_DELTA_THRESH)
         red_up_area = local_area_fraction(red_trans_mask & (red_dv > 0))
         red_down_area = local_area_fraction(red_trans_mask & (red_dv < 0))
-        red_area = max(red_up_area, red_down_area)
+        red_area = local_area_fraction(red_trans_mask)  # 결합 면적 (휘도와 동일)
         red_sign_now = block_sign_map(red_val, last_ext_redval, red_trans_mask)
-        if red_up_area >= area_threshold and red_down_area >= area_threshold:
+        if (red_up_area >= area_threshold * 0.5 and red_down_area >= area_threshold * 0.5
+                and red_area >= area_threshold):
             # 양방향 동시 유의: 같은 영역이 실제 반전했을 때만 opposing (휘도와 동일)
             if signs_reversed(red_sign_now, last_ext_red_sign):
                 red_cur_dir = -red_dir if red_dir != 0 else 1
