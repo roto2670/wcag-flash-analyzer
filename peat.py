@@ -9,7 +9,7 @@ peat.py — Harding/ITU-R BT.1702-3 기반 광과민성 발작 분석 엔진 (PE
   1. cd/m² 절대 휘도 기준: ≥20 cd/m² 변화(어두운쪽 <160), 그 이상은 Michelson >1/17
   2. 적색 플래시: WCAG 작업정의 — 포화적색 R/(R+G+B)≥0.8 + (R−G−B)×320 변화 >20
   3. 줄무늬(공간) 패턴 분석 추가
-  4. 페이싱 면제(leading edge ≥334ms/60Hz, ≥360ms/50Hz)
+  4. 페이싱 면제(앞뒤 간격이 모두 ≥334ms/60Hz·≥360ms/50Hz인 '고립' 전환만)
 
 출처:
   - WCAG 2.3.1: https://www.w3.org/WAI/WCAG21/Understanding/three-flashes-or-below-threshold.html
@@ -85,18 +85,6 @@ def red_flash_value(rgb_lin):
     >0.2 방식이지만, 공식 PEAT는 ×320 방식을 구현하므로 PEAT 재현 목표상 이쪽을 따른다."""
     v = rgb_lin[..., 0] - rgb_lin[..., 1] - rgb_lin[..., 2]
     return np.clip(v, 0.0, None) * 320.0
-
-
-def uv_prime(rgb_lin):
-    """선형 sRGB(D65) → CIE 1976 UCS (u', v'). shape (...,2)"""
-    R, G, B = rgb_lin[..., 0], rgb_lin[..., 1], rgb_lin[..., 2]
-    X = 0.4124 * R + 0.3576 * G + 0.1805 * B
-    Y = 0.2126 * R + 0.7152 * G + 0.0722 * B
-    Z = 0.0193 * R + 0.1192 * G + 0.9505 * B
-    denom = X + 15.0 * Y + 3.0 * Z + 1e-6
-    up = 4.0 * X / denom
-    vp = 9.0 * Y / denom
-    return np.stack([up, vp], axis=-1)
 
 
 def local_area_fraction(mask):
@@ -247,8 +235,6 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
     red_event_flags = []       # 적색 방향전환 발생 프레임
     pattern_flags = []         # 유해 줄무늬 패턴 프레임
 
-    lum_mag_series = []        # 휘도 변화량(diag, 그래프용 — ex.png 흰 실선)
-    red_mag_series = []        # 적색 정도(diag, 그래프용 — ex.png 빨강 실선)
     sat_area_series = []       # 포화 적색 존재 면적(전환 무관 — 적색 활동선용)
 
     # 휘도 극값(peak/valley) 추적 상태 — 평균 휘도 기반
@@ -296,17 +282,11 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         L_mean = float(L_cd.mean())
         t = processed / effective_fps
 
-        # diag(그래프)용 변화량 — main.py 방식, ex.png 실선과 동일 성격
-        red_soft = np.clip(rgb_lin[..., 0] - np.maximum(rgb_lin[..., 1], rgb_lin[..., 2]), 0.0, 1.0)
-        red_mag = float(red_soft.mean())
-
         # ── 첫 프레임 초기화 ──
         if last_ext_L_arr is None:
             times.append(t)
             lum_area_series.append(0.0)
             red_area_series.append(0.0)
-            lum_mag_series.append(0.0)
-            red_mag_series.append(red_mag)
             sat_area_series.append(local_area_fraction(satmask))
             lum_event_flags.append(False)
             red_event_flags.append(False)
@@ -339,7 +319,6 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         # (A 밝아짐 + B 어두워짐 동시)은 방향별로는 25% 미만일 수 있다.
         lum_area = local_area_fraction(harmful)
         lum_delta = L_mean - last_ext_L_mean
-        lum_mag = abs(lum_delta) / DISPLAY_PEAK_CD           # diag 변화량(0~1)
         sign_now = block_sign_map(L_cd, last_ext_L_arr, harmful)
         if (up_area >= area_threshold * 0.5 and down_area >= area_threshold * 0.5
                 and lum_area >= area_threshold):
@@ -508,8 +487,6 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         times.append(t)
         lum_area_series.append(lum_area)
         red_area_series.append(red_area)
-        lum_mag_series.append(lum_mag)
-        red_mag_series.append(red_mag)
         sat_area_series.append(local_area_fraction(satmask))
         lum_event_flags.append(lum_counted)
         red_event_flags.append(red_counted)
@@ -539,14 +516,11 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
     pattern_arr = np.array(pattern_flags, dtype=bool)
 
     def windowed_count(flags):
-        out = np.zeros(len(flags), dtype=np.int32)
-        dq = deque()
-        for i, f in enumerate(flags):
-            dq.append(f)
-            if len(dq) > window_frames:
-                dq.popleft()
-            out[i] = int(np.count_nonzero(dq))
-        return out
+        """각 인덱스에서 직전 window_frames개(현재 포함) True 개수."""
+        c = np.concatenate([[0], np.cumsum(flags.astype(np.int32))])
+        idx = np.arange(len(flags))
+        lo = np.maximum(0, idx - window_frames + 1)
+        return (c[idx + 1] - c[lo]).astype(np.int32)
 
     lum_window = windowed_count(lum_flags)
     red_window = windowed_count(red_flags)
@@ -601,8 +575,6 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         "times": np.array(times),
         "lum_area": np.array(lum_area_series),
         "red_area": np.array(red_area_series),
-        "lum_mag": np.array(lum_mag_series),
-        "red_mag": np.array(red_mag_series),
         "sat_area": np.array(sat_area_series),
         "lum_window": lum_window,
         "red_window": red_window,
@@ -626,17 +598,10 @@ def _rolling_mean(x, win):
     """각 인덱스에서 직전 win개(현재 포함) 값의 평균. 길이 보존.
     윈도우가 채워지지 않은 초반 구간(i < win-1)은 0.0으로 처리하여
     extended flash 초반 과대평가를 방지한다."""
-    if len(x) == 0:
-        return x
-    csum = np.concatenate([[0.0], np.cumsum(x)])
     out = np.zeros(len(x), dtype=np.float32)
-    for i in range(len(x)):
-        if i < win - 1:
-            # 윈도우 미채움: 아직 충분한 데이터 없음, 판정 보류
-            out[i] = 0.0
-        else:
-            lo = i - win + 1
-            out[i] = (csum[i + 1] - csum[lo]) / win
+    if len(x) >= win:
+        csum = np.concatenate([[0.0], np.cumsum(x)])
+        out[win - 1:] = (csum[win:] - csum[:-win]) / win
     return out
 
 
@@ -666,12 +631,6 @@ def area_to_band_y(areas, band_top, area_threshold=AREA_THRESHOLD):
     a = np.asarray(areas, dtype=np.float32)
     return np.clip(a / max(1e-9, area_threshold) * (0.25 * band_top),
                    0.0, band_top).astype(np.float32)
-
-
-def smooth(y, k=5):
-    if len(y) < k:
-        return y
-    return np.convolve(y, np.ones(k) / k, mode="same")
 
 
 def _rolling_max(x, win):
@@ -719,9 +678,9 @@ def plot_unified(metrics):
     h = band_top / 4
 
     # 선 높이를 밴드에 맞춤: 자기 최댓값 정규화 대신 전환수 임계를 밴드 경계에 고정
-    lum_act = count_to_band_y(metrics["lum_window"], band_top)
+    # (활동선(점선)과 diag(실선)는 같은 밴드 매핑을 공유 — 휘도는 동일 값)
+    lum_y = count_to_band_y(metrics["lum_window"], band_top)
     red_act = area_to_band_y(_rolling_max(metrics["sat_area"], win), band_top)
-    lum_cnt = count_to_band_y(metrics["lum_window"], band_top)      # 휘도 카운트(diag)
     red_cnt = count_to_band_y(metrics["red_window"], band_top)      # 적색 카운트(diag)
 
     fig, ax = plt.subplots(figsize=(12, 6))
@@ -736,13 +695,13 @@ def plot_unified(metrics):
                 va="center", ha="left", fontsize=8, color="#777", zorder=1)
 
     # 메인: 휘도 활동(점선) — ex.png에서 천장까지 솟는 'Luminance flash'
-    ax.plot(t, lum_act, color="white", linestyle="--", linewidth=1.1, label="Luminance flash")
+    ax.plot(t, lum_y, color="white", linestyle="--", linewidth=1.1, label="Luminance flash")
     # 하단: 적색 존재(점선) — 7~8초 표시
     ax.plot(t, red_act, color="red", linestyle="--", linewidth=1.0, label="Red flash")
     # Extended Flash — 경고 발생 시에만 (PEAT_wuwa는 미발생 → 안 보임)
     ax.plot(t, ext_disp * band_top, color="blue", linewidth=1.2, label="Extended Flash")
     # 하단: 카운트(실선) — Lum/Red flash diag
-    ax.plot(t, lum_cnt, color="white", linewidth=1.0, label="Lum flash diag")
+    ax.plot(t, lum_y, color="white", linewidth=1.0, label="Lum flash diag")
     ax.plot(t, red_cnt, color="darkred", linewidth=1.0, label="Red flash diag")
 
     ax.set_xlabel("Time (s)")

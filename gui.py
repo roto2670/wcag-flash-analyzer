@@ -19,10 +19,7 @@ import pyqtgraph as pg
 import numpy as np
 
 from worker import AnalysisWorker
-from peat import (
-    FAIL_TRANSITIONS, AREA_THRESHOLD, WINDOW_SECONDS, _rolling_max,
-    count_to_band_y, area_to_band_y,
-)
+from peat import FAIL_TRANSITIONS, _rolling_max, count_to_band_y, area_to_band_y
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -150,8 +147,6 @@ class PEATMainWindow(QMainWindow):
         self.times = []
         self.lum_window_counts = []
         self.red_window_counts = []
-        self.lum_areas = []
-        self.red_areas = []
         self.sat_areas = []
 
         self._build_ui()
@@ -466,8 +461,6 @@ class PEATMainWindow(QMainWindow):
         self.times.clear()
         self.lum_window_counts.clear()
         self.red_window_counts.clear()
-        self.lum_areas.clear()
-        self.red_areas.clear()
         self.sat_areas.clear()
         self.curve_lum_act.setData([], [])
         self.curve_red_act.setData([], [])
@@ -488,17 +481,10 @@ class PEATMainWindow(QMainWindow):
         self.btn_file.setEnabled(False)
 
         # 워커 생성
-        downsample = self.spin_downsample.value()
-        enable_pattern = self.chk_pattern.isChecked()
-
-        # emit_every: 모든 프레임 데이터를 받되, 차트 렌더링은 GUI에서 throttle
-        emit_every = 1
-
         self.worker = AnalysisWorker(
             video_path=self.video_path,
-            downsample=downsample,
-            enable_pattern=enable_pattern,
-            emit_every=emit_every,
+            downsample=self.spin_downsample.value(),
+            enable_pattern=self.chk_pattern.isChecked(),
         )
         self.worker.progress.connect(self._on_progress)
         self.worker.frame_result.connect(self._on_frame_result)
@@ -532,39 +518,37 @@ class PEATMainWindow(QMainWindow):
         self.progress_bar.setMaximum(max(1, total))
         self.progress_bar.setValue(current)
 
+    def _draw_band_curves(self, t, lum_window, red_window, sat_area, win):
+        """밴드 매핑 곡선 갱신 — peat.py plot_unified와 동일 로직
+        (전환수 임계를 밴드 경계에 고정). band_top을 반환."""
+        band_top = 10.0 * 0.30
+        lum_y = count_to_band_y(lum_window, band_top)
+        self.curve_lum_act.setData(t, lum_y)
+        self.curve_red_act.setData(t, area_to_band_y(_rolling_max(sat_area, win), band_top))
+        self.curve_lum_diag.setData(t, lum_y)
+        self.curve_red_diag.setData(t, count_to_band_y(red_window, band_top))
+        self.plot_widget.setXRange(0, t[-1] + 0.5, padding=0)
+        return band_top
+
     def _on_frame_result(self, data):
         self.times.append(data["time"])
         self.lum_window_counts.append(data["lum_window_count"])
         self.red_window_counts.append(data["red_window_count"])
         self.sat_areas.append(data.get("sat_area", 0.0))
 
-        # 차트 렌더링: 매 프레임
-        n = len(self.times)
-
         t_arr = np.array(self.times)
         lum_window = np.array(self.lum_window_counts, dtype=np.float32)
         red_window = np.array(self.red_window_counts, dtype=np.float32)
         sat_area = np.array(self.sat_areas, dtype=np.float32)
 
-        eff_fps = n / (t_arr[-1] + 1e-9)  # 현재까지의 effective fps 추정
+        eff_fps = len(self.times) / (t_arr[-1] + 1e-9)  # 현재까지의 effective fps 추정
         win = max(1, int(round(eff_fps)))
-
-        ymax = 10.0
-        band_top = ymax * 0.30
-
-        # peat.py plot_unified와 동일한 로직 — 전환수 임계를 밴드 경계에 고정
-        self.curve_lum_act.setData(t_arr, count_to_band_y(lum_window, band_top))
-        self.curve_red_act.setData(t_arr, area_to_band_y(_rolling_max(sat_area, win), band_top))
-        self.curve_lum_diag.setData(t_arr, count_to_band_y(lum_window, band_top))
-        self.curve_red_diag.setData(t_arr, count_to_band_y(red_window, band_top))
-        self.plot_widget.setXRange(0, t_arr[-1] + 0.5, padding=0)
+        self._draw_band_curves(t_arr, lum_window, red_window, sat_area, win)
 
         # 실시간 상태
-        lum_max = int(lum_window.max())
-        red_max = int(red_window.max())
         self.lbl_status.setText(
             f"분석 중... | 시간: {data['time']:.1f}s | "
-            f"휘도 최대: {lum_max} | 적색 최대: {red_max}"
+            f"휘도 최대: {int(lum_window.max())} | 적색 최대: {int(red_window.max())}"
         )
 
     def _on_finished(self, summary):
@@ -578,22 +562,11 @@ class PEATMainWindow(QMainWindow):
             red_window = np.array(summary["red_window"], dtype=np.float32)
             sat_area = np.array(summary.get("sat_area_series", [0.0] * len(t)), dtype=np.float32)
             ext = np.array(summary["extended_series"], dtype=np.float32)
-            eff_fps = summary["effective_fps"]
-            win = max(1, int(round(eff_fps)))  # 1초 윈도우 프레임수
+            win = max(1, int(round(summary["effective_fps"])))  # 1초 윈도우 프레임수
+            band_top = self._draw_band_curves(t, lum_window, red_window, sat_area, win)
 
-            ymax = 10.0
-            band_top = ymax * 0.30
-
-            # ── Extended Flash (파란선) — ≥0.8일 때만 표시 ──
-            ext_disp = np.where(ext >= 0.8, ext * band_top, 0.0)
-
-            # 차트 그리기 — 전환수 임계를 밴드 경계에 고정 (peat.py 동일)
-            self.curve_lum_act.setData(t, count_to_band_y(lum_window, band_top))
-            self.curve_red_act.setData(t, area_to_band_y(_rolling_max(sat_area, win), band_top))
-            self.curve_lum_diag.setData(t, count_to_band_y(lum_window, band_top))
-            self.curve_red_diag.setData(t, count_to_band_y(red_window, band_top))
-            self.curve_extended.setData(t, ext_disp)
-            self.plot_widget.setXRange(0, t[-1] + 0.5, padding=0)
+            # Extended Flash (파란선) — ≥0.8일 때만 표시
+            self.curve_extended.setData(t, np.where(ext >= 0.8, ext * band_top, 0.0))
 
             # 분석 완료 후 줌/슬라이드 활성화
             self.plot_widget.setMouseEnabled(x=True, y=True)
