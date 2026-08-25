@@ -70,6 +70,9 @@ class AnalysisWorker(QThread):
         summary["times"] = [float(v) for v in metrics["times"]]
         summary["lum_window"] = metrics["lum_window"].tolist()
         summary["red_window"] = metrics["red_window"].tolist()
+        summary["lum_window_raw"] = metrics["lum_window_raw"].tolist()
+        summary["red_window_raw"] = metrics["red_window_raw"].tolist()
+        summary["lum_window_act"] = metrics["lum_window_act"].tolist()
+        summary["red_window_act"] = metrics["red_window_act"].tolist()
         summary["extended_series"] = metrics["extended_series"].tolist()
-        summary["sat_area_series"] = [float(v) for v in metrics["sat_area"]]
         self.finished.emit(summary)

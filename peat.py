@@ -36,7 +36,10 @@ MICHELSON_THRESH = 1.0 / 17.0  # 어두운 상태 ≥160 cd/m²일 때 유해 �
 AREA_THRESHOLD = 0.25     # 플래시 면적: 전체 화면의 25% (ITU/Ofcom 기준)
 RED_RATIO_THRESH = 0.80   # 포화 적색: R/(R+G+B) ≥ 0.8
 RED_DELTA_THRESH = 20.0   # 적색 전환: (R−G−B)×320 변화 > 20 (WCAG 작업정의)
-WINDOW_SECONDS = 1.0      # 슬라이딩 윈도우
+WINDOW_SECONDS = 1.0      # 슬라이딩 윈도우 (판정용)
+ACT_WINDOW_SECONDS = 0.75  # 활동선(점선) 표시 전용 짧은 윈도우 — 초당 환산해 그림.
+                           # 공식 PEAT 점선처럼 상승·하강이 날카로움. 1.0은 꼬리가
+                           # 늘어지고 0.5는 스파이크가 좁아짐 — wuwa/ex.png 대조로 0.75 선정
 FAIL_TRANSITIONS = 7      # 1초 내 방향전환 ≥7회 (= >3 flash = >6 transition)
 PACE_SAFE_60HZ = 0.334    # leading edge 간격 ≥334ms면 안전 (60Hz 환경)
 PACE_SAFE_50HZ = 0.360    # ≥360ms면 안전 (50Hz 환경)
@@ -124,7 +127,11 @@ def signs_reversed(s_now, s_prev):
     act_prev = np.abs(s_prev) > 0.05
     overlap = act_now & act_prev
     if overlap.any():
-        return float((s_now * s_prev)[overlap].mean()) < -0.2
+        # 임계 −0.02: 모션은 겹침 상관이 양수(전연/후연 부호 유지), 점멸은 음수 —
+        # 부호만으로 갈린다. −0.2처럼 깊은 반상관을 요구하면 장면 전체가 바뀌며
+        # 점멸하는 컷 점멸(게임/트레일러)의 희석된 상관(−0.2~−0.02)을 놓친다
+        # (PEAT_wuwa 실측: 진짜 점멸 corr −0.03~−0.85, 모션 +0.02~+0.48).
+        return float((s_now * s_prev)[overlap].mean()) < -0.02
     if not act_now.any() or not act_prev.any():
         return False
     m_now = float(s_now[act_now].mean())
@@ -221,6 +228,8 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
     effective_fps = fps / max(1, downsample)
     pace_safe = PACE_SAFE_50HZ if fps <= 55 else PACE_SAFE_60HZ
     window_frames = max(1, int(round(window_seconds * effective_fps)))
+    act_frames = max(1, int(round(ACT_WINDOW_SECONDS * effective_fps)))
+    act_scale = window_seconds / ACT_WINDOW_SECONDS  # 짧은 윈도우 카운트 → 초당 환산
 
     # 진행률 표시용 총 처리 프레임 수 (추정)
     total_proc = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) // max(1, downsample)
@@ -231,8 +240,10 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
     times = []
     lum_area_series = []       # 극값 대비 휘도 플래시 면적
     red_area_series = []       # 극값 대비 적색 플래시 면적
-    lum_event_flags = []       # 휘도 방향전환(opposing) 발생 프레임
-    red_event_flags = []       # 적색 방향전환 발생 프레임
+    lum_event_flags = []       # 휘도 방향전환(opposing) 발생 프레임 — 판정용(게이트 통과)
+    red_event_flags = []       # 적색 방향전환 발생 프레임 — 판정용(게이트 통과)
+    lum_raw_flags = []         # 게이트 전 원시 반전 후보 — diag(실선) 표시용 (공식 PEAT 모양)
+    red_raw_flags = []
     pattern_flags = []         # 유해 줄무늬 패턴 프레임
 
     sat_area_series = []       # 포화 적색 존재 면적(전환 무관 — 적색 활동선용)
@@ -290,6 +301,8 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
             sat_area_series.append(local_area_fraction(satmask))
             lum_event_flags.append(False)
             red_event_flags.append(False)
+            lum_raw_flags.append(False)
+            red_raw_flags.append(False)
             pattern_flags.append(False)
             last_ext_L_mean = L_mean
             last_ext_L_arr = L_cd.copy()
@@ -303,6 +316,8 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
                     "lum_area": 0.0, "red_area": 0.0,
                     "sat_area": sat_area_series[-1],
                     "lum_window_count": 0, "red_window_count": 0,
+                    "lum_window_raw_count": 0, "red_window_raw_count": 0,
+                    "lum_act_count": 0.0, "red_act_count": 0.0,
                     "pattern_hit": False,
                     "lum_opposing": False, "red_opposing": False,
                 })
@@ -490,6 +505,8 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         sat_area_series.append(local_area_fraction(satmask))
         lum_event_flags.append(lum_counted)
         red_event_flags.append(red_counted)
+        lum_raw_flags.append(bool(lum_opposing_raw or lum_burst_start))
+        red_raw_flags.append(bool(red_opposing_raw or red_burst_start))
         pattern_flags.append(pattern_hit)
 
         prev_L_cd = L_cd
@@ -503,6 +520,10 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
                 "sat_area": sat_area_series[-1],
                 "lum_window_count": int(np.count_nonzero(lum_event_flags[-window_frames:])),
                 "red_window_count": int(np.count_nonzero(red_event_flags[-window_frames:])),
+                "lum_window_raw_count": int(np.count_nonzero(lum_raw_flags[-window_frames:])),
+                "red_window_raw_count": int(np.count_nonzero(red_raw_flags[-window_frames:])),
+                "lum_act_count": float(np.count_nonzero(lum_event_flags[-act_frames:]) * act_scale),
+                "red_act_count": float(np.count_nonzero(red_event_flags[-act_frames:]) * act_scale),
                 "pattern_hit": pattern_hit,
                 "lum_opposing": lum_counted,
                 "red_opposing": red_counted,
@@ -515,15 +536,20 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
     red_flags = np.array(red_event_flags, dtype=bool)
     pattern_arr = np.array(pattern_flags, dtype=bool)
 
-    def windowed_count(flags):
-        """각 인덱스에서 직전 window_frames개(현재 포함) True 개수."""
+    def windowed_count(flags, wf=window_frames):
+        """각 인덱스에서 직전 wf개(현재 포함) True 개수."""
         c = np.concatenate([[0], np.cumsum(flags.astype(np.int32))])
         idx = np.arange(len(flags))
-        lo = np.maximum(0, idx - window_frames + 1)
+        lo = np.maximum(0, idx - wf + 1)
         return (c[idx + 1] - c[lo]).astype(np.int32)
 
     lum_window = windowed_count(lum_flags)
     red_window = windowed_count(red_flags)
+    lum_window_raw = windowed_count(np.array(lum_raw_flags, dtype=bool))
+    red_window_raw = windowed_count(np.array(red_raw_flags, dtype=bool))
+    # 활동선(점선) 표시용: 0.5초 윈도우 카운트를 초당 환산 — 판정과 무관
+    lum_window_act = windowed_count(lum_flags, act_frames).astype(np.float32) * act_scale
+    red_window_act = windowed_count(red_flags, act_frames).astype(np.float32) * act_scale
 
     lum_fail = bool((lum_window >= FAIL_TRANSITIONS).any())
     red_fail = bool((red_window >= FAIL_TRANSITIONS).any())
@@ -578,6 +604,10 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         "sat_area": np.array(sat_area_series),
         "lum_window": lum_window,
         "red_window": red_window,
+        "lum_window_raw": lum_window_raw,
+        "red_window_raw": red_window_raw,
+        "lum_window_act": lum_window_act,
+        "red_window_act": red_window_act,
         "extended_series": extended_series,
         "pattern_flags": pattern_arr,
         "summary": summary,
@@ -608,6 +638,9 @@ def _rolling_mean(x, win):
 # ──────────────────────────────────────────────────────────────────────────
 # 출력
 # ──────────────────────────────────────────────────────────────────────────
+BAND_TOP_FRAC = 0.22  # 4단계 밴드가 차지하는 y축 하단 비율 — 공식 PEAT(ex.png)와 동일한 두께
+
+
 def count_to_band_y(counts, band_top):
     """1초 윈도우 전환수 → 밴드 경계에 맞춘 y좌표 (구간별 선형 보간).
 
@@ -626,22 +659,17 @@ def count_to_band_y(counts, band_top):
     return np.interp(np.asarray(counts, dtype=np.float32), xp, fp).astype(np.float32)
 
 
-def area_to_band_y(areas, band_top, area_threshold=AREA_THRESHOLD):
-    """플래시 면적(0~1) → y좌표. 면적 임계가 첫 밴드 경계에 오도록 선형."""
-    a = np.asarray(areas, dtype=np.float32)
-    return np.clip(a / max(1e-9, area_threshold) * (0.25 * band_top),
-                   0.0, band_top).astype(np.float32)
-
-
-def _rolling_max(x, win):
-    """각 인덱스에서 직전 win개(현재 포함) 최댓값. 활동선을 매끄러운 봉우리로."""
-    x = np.asarray(x, dtype=np.float32)
-    if len(x) == 0:
-        return x
-    out = np.zeros(len(x), dtype=np.float32)
-    for i in range(len(x)):
-        out[i] = x[max(0, i - win + 1): i + 1].max()
-    return out
+def count_to_activity_y(counts, band_top, ymax):
+    """활동선(점선)용 확장 매핑: 밴드 경계까지는 count_to_band_y와 동일하되,
+    FAIL 이상 카운트는 밴드를 뚫고 차트 천장(0.95·ymax)까지 치솟는다 —
+    공식 PEAT 결과창(ex.png)의 'Luminance flash' 점선 모양. diag(실선)는
+    count_to_band_y로 밴드 안에 머물러 두 선이 구분된다.
+    천장은 FAIL+3부터 — 공식 PEAT처럼 FAIL을 확실히 넘긴 구간은 천장에 붙는다."""
+    onethird = max(1, FAIL_TRANSITIONS // 3)
+    xp = [0.0, float(onethird), float(FAIL_TRANSITIONS - 1),
+          float(FAIL_TRANSITIONS), float(FAIL_TRANSITIONS + 3)]
+    fp = [0.0, 0.25 * band_top, 0.50 * band_top, 0.75 * band_top, 0.95 * ymax]
+    return np.interp(np.asarray(counts, dtype=np.float32), xp, fp).astype(np.float32)
 
 
 def print_summary(metrics):
@@ -667,21 +695,22 @@ def plot_unified(metrics):
     """
     t = metrics["times"]
     verdict = metrics["summary"]["verdict"]
-    eff_fps = metrics["summary"]["effective_fps"]
-    win = max(1, int(round(eff_fps)))                       # 1초 윈도우
 
     ext = metrics["extended_series"]
     ext_disp = np.where(ext >= 0.8, ext, 0.0)               # 경고 발생 시에만
 
     ymax = 10.0
-    band_top = ymax * 0.30
+    band_top = ymax * BAND_TOP_FRAC
     h = band_top / 4
 
-    # 선 높이를 밴드에 맞춤: 자기 최댓값 정규화 대신 전환수 임계를 밴드 경계에 고정
-    # (활동선(점선)과 diag(실선)는 같은 밴드 매핑을 공유 — 휘도는 동일 값)
-    lum_y = count_to_band_y(metrics["lum_window"], band_top)
-    red_act = area_to_band_y(_rolling_max(metrics["sat_area"], win), band_top)
-    red_cnt = count_to_band_y(metrics["red_window"], band_top)      # 적색 카운트(diag)
+    # 선 높이를 밴드에 맞춤: 자기 최댓값 정규화 대신 전환수 임계를 밴드 경계에 고정.
+    # 점선(활동선) = 판정 카운트 — FAIL 초과 시 밴드를 뚫고 천장까지 (ex.png 모양).
+    # 실선(diag) = 게이트(모션 제외) 전 원시 반전 후보의 '플래시 수'(전환÷2) —
+    # 공식 PEAT diag처럼 낮은 활동까지 길게 이어지고 정점이 CAUTION(FAIL) 부근에 머묾.
+    lum_act = count_to_activity_y(metrics["lum_window_act"], band_top, ymax)
+    red_act = count_to_activity_y(metrics["red_window_act"], band_top, ymax)
+    lum_cnt = count_to_band_y(metrics["lum_window_raw"] / 2.0, band_top)
+    red_cnt = count_to_band_y(metrics["red_window_raw"] / 2.0, band_top)
 
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.set_facecolor("#cfd2d6")
@@ -695,13 +724,13 @@ def plot_unified(metrics):
                 va="center", ha="left", fontsize=8, color="#777", zorder=1)
 
     # 메인: 휘도 활동(점선) — ex.png에서 천장까지 솟는 'Luminance flash'
-    ax.plot(t, lum_y, color="white", linestyle="--", linewidth=1.1, label="Luminance flash")
+    ax.plot(t, lum_act, color="white", linestyle="--", linewidth=1.8, label="Luminance flash")
     # 하단: 적색 존재(점선) — 7~8초 표시
-    ax.plot(t, red_act, color="red", linestyle="--", linewidth=1.0, label="Red flash")
+    ax.plot(t, red_act, color="red", linestyle="--", linewidth=1.6, label="Red flash")
     # Extended Flash — 경고 발생 시에만 (PEAT_wuwa는 미발생 → 안 보임)
     ax.plot(t, ext_disp * band_top, color="blue", linewidth=1.2, label="Extended Flash")
     # 하단: 카운트(실선) — Lum/Red flash diag
-    ax.plot(t, lum_y, color="white", linewidth=1.0, label="Lum flash diag")
+    ax.plot(t, lum_cnt, color="white", linewidth=1.0, label="Lum flash diag")
     ax.plot(t, red_cnt, color="darkred", linewidth=1.0, label="Red flash diag")
 
     ax.set_xlabel("Time (s)")

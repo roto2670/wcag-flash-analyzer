@@ -48,14 +48,14 @@ python peat.py --video ./temp/<영상파일> --no_show  # 그래프 없이 콘�
 
 프레임 분석 루프·카운트·판정은 **`peat.py:analyze_video` 한 곳에만 존재**한다. CLI는 콜백 없이 호출하고, GUI는 `worker.py:AnalysisWorker`가 `on_frame`(매 프레임 실시간 데이터 dict 수신 → 시그널 emit)과 `should_stop`(중단 버튼) 콜백을 주입해 같은 함수를 구동한다. `should_stop`이 True를 반환하면 `analyze_video`는 `None`을 반환한다(→ worker는 `finished` 미발생). 분석 알고리즘 수정은 `peat.py`만 고치면 GUI/CLI 모두 반영된다.
 
-차트 y좌표 매핑(`count_to_band_y`, `area_to_band_y`, `_rolling_max`)도 `peat.py` 정의를 GUI가 import한다.
+차트 y좌표 매핑(`count_to_band_y`, `count_to_activity_y`)도 `peat.py` 정의를 GUI가 import한다.
 
 ### 분석 파이프라인 — `peat.py`
 
 공통 파이프라인: `cv2.VideoCapture` 프레임 읽기 → sRGB 선형화(breakpoint **0.04045**) → 절대 휘도 `cd/m² = Y_rel × DISPLAY_PEAK_CD`(기본 200, SDR 가정).
 
 1. **휘도 플래시**: 극값(피크/밸리) 프레임 대비 **유해 전환 픽셀을 방향별(밝아짐/어두워짐)로 분리**해 각각의 **로컬 10° 시야각 면적**(`local_area_fraction`: 화면 1/3×1/3 박스의 최대 깜빡임 밀도, 화면 안에 완전히 들어가는 박스만)을 계산. **유의성은 결합(전체 유해) 면적 ≥25%로 판정**(WCAG "동시 발생 플래시의 결합 면적" — 역위상 점멸은 방향별로 25% 미만일 수 있음)하고, 방향이 직전과 반대(opposing)면 전환 1회로 카운트. 역위상 분기는 양방향 각각 ≥12.5%(=임계의 절반) + 결합 ≥25%일 때 진입. 방향 판정 규칙:
-   - **모든 전환 카운트는 `signs_reversed`(방향 블록 지도 상관 < −0.2) 필수** — WCAG의 "동일 영역의 opposing change" 그대로. 지배 박스가 근소한 차이로 뒤바뀌는 모션/줌/제품 회전은 부호 지도가 유지되어 제외되고, 진짜 점멸은 같은 블록의 부호가 반전되어 통과. 반전 후보였으나 검사 탈락 시 카운트 없이 방향/극값만 전환(다음 실제 반전을 놓치지 않기 위함). **겹침 없음 폴백**: 두 지도의 활성 블록이 겹치지 않으면(플래시 영역 이동/점프 — 교차 스트로브) 각 지도의 지배 부호 곱 < −0.36으로 판정 — 점멸은 지도가 모노 방향 + 서로 반대, 모션은 전연(상승)/후연(하강)이 한 지도에 섞여 지배 부호가 약해 False 유지
+   - **모든 전환 카운트는 `signs_reversed`(방향 블록 지도 상관 < −0.02) 필수** — WCAG의 "동일 영역의 opposing change" 그대로. 지배 박스가 근소한 차이로 뒤바뀌는 모션/줌/제품 회전은 부호 지도가 유지되어(상관 양수) 제외되고, 진짜 점멸은 같은 블록의 부호가 반전되어(상관 음수) 통과. 임계가 −0.2처럼 깊으면 장면 전체가 바뀌며 점멸하는 컷 점멸(게임 트레일러)의 희석된 상관(−0.2~−0.02)을 놓침 — PEAT_wuwa 실측으로 −0.02 확정(진짜 점멸 −0.03~−0.85, 모션 +0.02~+0.48). 반전 후보였으나 검사 탈락 시 카운트 없이 방향/극값만 전환(다음 실제 반전을 놓치지 않기 위함). **겹침 없음 폴백**: 두 지도의 활성 블록이 겹치지 않으면(플래시 영역 이동/점프 — 교차 스트로브) 각 지도의 지배 부호 곱 < −0.36으로 판정 — 점멸은 지도가 모노 방향 + 서로 반대, 모션은 전연(상승)/후연(하강)이 한 지도에 섞여 지배 부호가 약해 False 유지
    - up/down 양쪽 모두 ≥25%(역위상 동시 점멸 후보)일 때도 동일 검사로 판정
    - 유해 픽셀이 있으면 지배 방향(면적 큰 쪽), 없으면 전역 평균 부호로 극값 드리프트만 추적
    - ※ 전체 화면 25%가 아니라 로컬 영역 25% — WCAG "10° 시야각" 기준이라 국소 플래시 포착. 방향도 로컬(방향별 면적) 기준 — 전역 평균 방향은 화면 구석의 국소 플래시를 놓침(test-2에서 수정됨).
@@ -76,15 +76,15 @@ python peat.py --video ./temp/<영상파일> --no_show  # 그래프 없이 콘�
 
 4단계 밴드는 y축 하단 30%(`band_top = ymax×0.30`)에 얇게 배치. **선 높이는 자기 최댓값 정규화가 아니라 전환수 임계를 밴드 경계에 고정**(`count_to_band_y`): 0→PASS 바닥, `FAIL_TRANSITIONS//3`→1/4, `FAIL_TRANSITIONS-1`→2/4, `FAIL_TRANSITIONS`→3/4, `2×FAIL_TRANSITIONS`→천장. 따라서 선이 놓인 밴드가 그대로 그 시점의 등급이다.
 
-- **Luminance flash / Red flash (점선)** = 메인 활동선. 휘도는 `lum_window` 카운트의 밴드 매핑; 적색은 `sat_area`(포화적색 존재 면적, 전환 무관)의 1초 rolling max를 `area_to_band_y`로 — 지속 적색도 표시되도록.
-- **Lum/Red flash diag (실선)** = 윈도우 카운트(보조).
+- **Luminance flash / Red flash (점선)** = 메인 활동선. 휘도/적색 모두 판정 카운트(`lum_window`/`red_window`)의 `count_to_activity_y` — 밴드 경계까지는 밴드 매핑과 동일하되 FAIL 이상 카운트는 밴드를 뚫고 차트 천장(0.95×ymax)까지 치솟음(공식 PEAT ex.png의 점선 모양).
+- **Lum/Red flash diag (실선)** = **게이트(모션 제외·페이싱·장면전환) 적용 전 원시 반전 후보** 카운트(`lum_window_raw`/`red_window_raw`)의 `count_to_band_y` — 공식 PEAT처럼 낮은 활동 구간까지 길게 이어지는 진단선. 판정에는 영향 없음.
 - **Extended Flash (파란선)** = `extended_series` ≥0.8(경고 발생)일 때만 표시.
 
 ### GUI 흐름 — `gui.py`
 
 - 입력 3경로: 파일 선택 / 드래그앤드롭 / YouTube URL(`DownloadWorker` — yt-dlp subprocess 우선, 실패 시 라이브러리 직접 호출; `%TEMP%/wcag_flash_temp`에 720p 이하 H.264 우선 비디오만 다운로드 후 자동 분석 시작).
 - 분석 중: `frame_result` 시그널마다 데이터 누적 + 매 프레임 차트 갱신. 완료 후 summary의 전체 시계열로 최종 차트를 다시 그리고 줌/팬 활성화 — `setLimits(xMin=0, xMax=영상길이+0.5, yMin=0, yMax=10)`로 영상 길이·y축 범위 밖 줌아웃 차단.
-- 상호작용: FAIL 구간 타임스탬프 링크·차트 클릭 → `_show_frame_at_time`으로 해당 프레임 미리보기 + 수직선(`vline`); 좌우 방향키로 1프레임씩 이동(`keyPressEvent`).
+- 상호작용: FAIL 구간 타임스탬프 링크·차트 클릭 → `_show_frame_at_time`으로 해당 프레임 미리보기 + 수직선(`vline`); 좌우 방향키로 1프레임씩 이동(`keyPressEvent`). **위반 영역 하이라이트**(`chk_highlight`, 기본 켜짐): 직전 프레임 대비 휘도 유해 변화 픽셀은 노랑, 적색 전환 픽셀은 청록 반투명 오버레이(`_violation_masks` — 분석 루프는 극값 대비지만 시각화는 프레임간 변화로 근사), 상태바에 위반 픽셀 비율 표시.
 - 내보내기: PNG은 pyqtgraph `ImageExporter`, PDF는 matplotlib(Agg)로 차트+판정 정보 2페이지 재생성.
 - OpenGL은 꺼져 있음 — pyqtgraph OpenGL이 DashLine 스타일을 무시하는 문제(commit c0a17ad). 코덱은 H.264 우선(AV1 디코더의 OS간 차이 회피).
 

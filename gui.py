@@ -19,7 +19,12 @@ import pyqtgraph as pg
 import numpy as np
 
 from worker import AnalysisWorker
-from peat import FAIL_TRANSITIONS, _rolling_max, count_to_band_y, area_to_band_y
+from peat import (
+    FAIL_TRANSITIONS, RED_RATIO_THRESH, RED_DELTA_THRESH, BAND_TOP_FRAC,
+    count_to_band_y, count_to_activity_y,
+    bgr_to_rgb01, linearize_srgb, luminance_cd,
+    harmful_luminance_mask, saturated_red_ratio, red_flash_value,
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -147,7 +152,10 @@ class PEATMainWindow(QMainWindow):
         self.times = []
         self.lum_window_counts = []
         self.red_window_counts = []
-        self.sat_areas = []
+        self.lum_raw_counts = []
+        self.red_raw_counts = []
+        self.lum_act_counts = []
+        self.red_act_counts = []
 
         self._build_ui()
 
@@ -271,8 +279,8 @@ class PEATMainWindow(QMainWindow):
         self.plot_widget.getViewBox().enableAutoRange(axis='xy', enable=False)
         self.plot_widget.setXRange(0, 1)
 
-        # 밴드
-        band_top = 3.0
+        # 밴드 — 두께는 peat.BAND_TOP_FRAC (공식 PEAT와 동일)
+        band_top = 10.0 * BAND_TOP_FRAC
         h = band_top / 4
         band_colors = ["#c8cbcf", "#bfc3c7", "#b6babe", "#adb1b5"]
         band_labels = ["PASS", "CAUTION (PASS)", "CAUTION (FAIL)", "FAIL"]
@@ -296,9 +304,9 @@ class PEATMainWindow(QMainWindow):
         legend.setFlag(legend.GraphicsItemFlag.ItemIsMovable, False)
 
         self.curve_lum_act = self.plot_widget.plot(
-            pen=pg.mkPen(color="white", width=2, style=Qt.DashLine), name="Luminance flash")
+            pen=pg.mkPen(color="white", width=3, style=Qt.DashLine), name="Luminance flash")
         self.curve_red_act = self.plot_widget.plot(
-            pen=pg.mkPen(color="#FF5252", width=2, style=Qt.DashLine), name="Red flash")
+            pen=pg.mkPen(color="#FF5252", width=3, style=Qt.DashLine), name="Red flash")
         self.curve_lum_diag = self.plot_widget.plot(
             pen=pg.mkPen(color="white", width=1), name="Lum flash diag")
         self.curve_red_diag = self.plot_widget.plot(
@@ -326,6 +334,12 @@ class PEATMainWindow(QMainWindow):
         self.frame_preview.setMinimumSize(280, 180)
         self.frame_preview.setObjectName("framePreview")
         right_panel.addWidget(self.frame_preview)
+
+        # 위반 영역 하이라이트 토글 (직전 프레임 대비 유해 변화 픽셀)
+        self.chk_highlight = QCheckBox("위반 영역 표시 (노랑=휘도, 청록=적색)")
+        self.chk_highlight.setChecked(True)
+        self.chk_highlight.toggled.connect(self._refresh_preview)
+        right_panel.addWidget(self.chk_highlight)
 
         # 판정 결과
         self.lbl_verdict = QLabel("—")
@@ -461,7 +475,10 @@ class PEATMainWindow(QMainWindow):
         self.times.clear()
         self.lum_window_counts.clear()
         self.red_window_counts.clear()
-        self.sat_areas.clear()
+        self.lum_raw_counts.clear()
+        self.red_raw_counts.clear()
+        self.lum_act_counts.clear()
+        self.red_act_counts.clear()
         self.curve_lum_act.setData([], [])
         self.curve_red_act.setData([], [])
         self.curve_lum_diag.setData([], [])
@@ -518,15 +535,17 @@ class PEATMainWindow(QMainWindow):
         self.progress_bar.setMaximum(max(1, total))
         self.progress_bar.setValue(current)
 
-    def _draw_band_curves(self, t, lum_window, red_window, sat_area, win):
-        """밴드 매핑 곡선 갱신 — peat.py plot_unified와 동일 로직
-        (전환수 임계를 밴드 경계에 고정). band_top을 반환."""
-        band_top = 10.0 * 0.30
-        lum_y = count_to_band_y(lum_window, band_top)
-        self.curve_lum_act.setData(t, lum_y)
-        self.curve_red_act.setData(t, area_to_band_y(_rolling_max(sat_area, win), band_top))
-        self.curve_lum_diag.setData(t, lum_y)
-        self.curve_red_diag.setData(t, count_to_band_y(red_window, band_top))
+    def _draw_band_curves(self, t, lum_act, red_act, lum_raw, red_raw):
+        """밴드 매핑 곡선 갱신 — peat.py plot_unified와 동일 로직.
+        점선(활동선) = 짧은 표시 윈도우 카운트의 초당 환산, FAIL 초과 시 밴드를
+        뚫고 천장까지(ex.png 모양). 실선(diag) = 게이트 전 원시 반전 후보의
+        '플래시 수'(전환÷2) — 공식 PEAT diag 스케일. band_top을 반환."""
+        ymax = 10.0
+        band_top = ymax * BAND_TOP_FRAC
+        self.curve_lum_act.setData(t, count_to_activity_y(lum_act, band_top, ymax))
+        self.curve_red_act.setData(t, count_to_activity_y(red_act, band_top, ymax))
+        self.curve_lum_diag.setData(t, count_to_band_y(lum_raw / 2.0, band_top))
+        self.curve_red_diag.setData(t, count_to_band_y(red_raw / 2.0, band_top))
         self.plot_widget.setXRange(0, t[-1] + 0.5, padding=0)
         return band_top
 
@@ -534,16 +553,19 @@ class PEATMainWindow(QMainWindow):
         self.times.append(data["time"])
         self.lum_window_counts.append(data["lum_window_count"])
         self.red_window_counts.append(data["red_window_count"])
-        self.sat_areas.append(data.get("sat_area", 0.0))
+        self.lum_raw_counts.append(data.get("lum_window_raw_count", 0))
+        self.red_raw_counts.append(data.get("red_window_raw_count", 0))
+        self.lum_act_counts.append(data.get("lum_act_count", data["lum_window_count"]))
+        self.red_act_counts.append(data.get("red_act_count", data["red_window_count"]))
 
         t_arr = np.array(self.times)
         lum_window = np.array(self.lum_window_counts, dtype=np.float32)
         red_window = np.array(self.red_window_counts, dtype=np.float32)
-        sat_area = np.array(self.sat_areas, dtype=np.float32)
-
-        eff_fps = len(self.times) / (t_arr[-1] + 1e-9)  # 현재까지의 effective fps 추정
-        win = max(1, int(round(eff_fps)))
-        self._draw_band_curves(t_arr, lum_window, red_window, sat_area, win)
+        lum_raw = np.array(self.lum_raw_counts, dtype=np.float32)
+        red_raw = np.array(self.red_raw_counts, dtype=np.float32)
+        lum_act = np.array(self.lum_act_counts, dtype=np.float32)
+        red_act = np.array(self.red_act_counts, dtype=np.float32)
+        self._draw_band_curves(t_arr, lum_act, red_act, lum_raw, red_raw)
 
         # 실시간 상태
         self.lbl_status.setText(
@@ -560,10 +582,12 @@ class PEATMainWindow(QMainWindow):
             t = np.array(summary["times"])
             lum_window = np.array(summary["lum_window"], dtype=np.float32)
             red_window = np.array(summary["red_window"], dtype=np.float32)
-            sat_area = np.array(summary.get("sat_area_series", [0.0] * len(t)), dtype=np.float32)
+            lum_raw = np.array(summary.get("lum_window_raw", summary["lum_window"]), dtype=np.float32)
+            red_raw = np.array(summary.get("red_window_raw", summary["red_window"]), dtype=np.float32)
+            lum_act = np.array(summary.get("lum_window_act", summary["lum_window"]), dtype=np.float32)
+            red_act = np.array(summary.get("red_window_act", summary["red_window"]), dtype=np.float32)
             ext = np.array(summary["extended_series"], dtype=np.float32)
-            win = max(1, int(round(summary["effective_fps"])))  # 1초 윈도우 프레임수
-            band_top = self._draw_band_curves(t, lum_window, red_window, sat_area, win)
+            band_top = self._draw_band_curves(t, lum_act, red_act, lum_raw, red_raw)
 
             # Extended Flash (파란선) — ≥0.8일 때만 표시
             self.curve_extended.setData(t, np.where(ext >= 0.8, ext * band_top, 0.0))
@@ -834,8 +858,27 @@ class PEATMainWindow(QMainWindow):
         # 해당 시간의 프레임 추출
         self._show_frame_at_time(click_time)
 
+    def _refresh_preview(self):
+        """하이라이트 토글 시 현재 미리보기 프레임 다시 그리기"""
+        if self._current_preview_time is not None and hasattr(self, "video_path"):
+            self._show_frame_at_time(self._current_preview_time)
+
+    @staticmethod
+    def _violation_masks(frame, prev_frame):
+        """직전 프레임 대비 위반 픽셀 마스크 (휘도 유해 변화, 적색 전환).
+        분석 루프는 극값 대비지만, 시각화는 프레임간 변화로도 위반 위치를 충분히 보여준다."""
+        lin_now = linearize_srgb(bgr_to_rgb01(frame))
+        lin_prev = linearize_srgb(bgr_to_rgb01(prev_frame))
+        lum_mask = harmful_luminance_mask(luminance_cd(lin_now), luminance_cd(lin_prev))
+        sat_now = saturated_red_ratio(lin_now) >= RED_RATIO_THRESH
+        sat_prev = saturated_red_ratio(lin_prev) >= RED_RATIO_THRESH
+        red_dv = red_flash_value(lin_now) - red_flash_value(lin_prev)
+        red_mask = (sat_now | sat_prev) & (np.abs(red_dv) > RED_DELTA_THRESH)
+        return lum_mask, red_mask
+
     def _show_frame_at_time(self, time_sec):
-        """영상에서 특정 시간의 프레임을 추출하여 미리보기에 표시"""
+        """영상에서 특정 시간의 프레임을 추출하여 미리보기에 표시.
+        하이라이트 켜짐 + 직전 프레임 존재 시 위반 픽셀을 색으로 표시."""
         try:
             cap = cv2.VideoCapture(self.video_path)
             if not cap.isOpened():
@@ -847,9 +890,17 @@ class PEATMainWindow(QMainWindow):
             self._video_fps = fps
             self._current_preview_time = time_sec
 
-            # 해당 시간으로 seek
+            # 직전 프레임부터 순차로 읽어 seek 1회로 두 프레임 확보
             frame_num = int(time_sec * fps)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+            prev_frame = None
+            if frame_num > 0 and self.chk_highlight.isChecked():
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num - 1)
+                ret_p, prev_frame = cap.read()
+                if not ret_p:
+                    prev_frame = None
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+            else:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
 
             ret, frame = cap.read()
             cap.release()
@@ -858,13 +909,26 @@ class PEATMainWindow(QMainWindow):
                 self.frame_preview.setText(f"프레임 읽기 실패 (t={time_sec:.2f}s)")
                 return
 
-            # BGR → RGB 변환 후 QPixmap으로
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h, w, ch = frame_rgb.shape
-            bytes_per_line = ch * w
 
+            # 위반 영역 오버레이: 노랑=휘도 유해 변화, 청록=적색 전환
+            status_extra = ""
+            if prev_frame is not None and prev_frame.shape == frame.shape:
+                lum_mask, red_mask = self._violation_masks(frame, prev_frame)
+                if lum_mask.any() or red_mask.any():
+                    out = frame_rgb.astype(np.float32)
+                    if lum_mask.any():
+                        out[lum_mask] = out[lum_mask] * 0.55 + np.float32([255, 235, 59]) * 0.45
+                    if red_mask.any():
+                        out[red_mask] = out[red_mask] * 0.55 + np.float32([0, 229, 255]) * 0.45
+                    frame_rgb = np.ascontiguousarray(out.astype(np.uint8))
+                    total = lum_mask.size
+                    status_extra = (f" | 위반 픽셀: 휘도 {lum_mask.sum() / total:.0%}, "
+                                    f"적색 {red_mask.sum() / total:.0%}")
+
+            h, w, ch = frame_rgb.shape
             from PyQt5.QtGui import QImage, QPixmap
-            qimg = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            qimg = QImage(frame_rgb.data, w, h, ch * w, QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(qimg)
 
             # 미리보기 크기에 맞게 스케일
@@ -875,7 +939,8 @@ class PEATMainWindow(QMainWindow):
                 Qt.SmoothTransformation,
             )
             self.frame_preview.setPixmap(scaled)
-            self.statusBar().showMessage(f"프레임 표시: {time_sec:.2f}s (frame #{frame_num})")
+            self.statusBar().showMessage(
+                f"프레임 표시: {time_sec:.2f}s (frame #{frame_num}){status_extra}")
 
         except Exception as e:
             self.frame_preview.setText(f"오류: {e}")
