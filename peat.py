@@ -43,6 +43,7 @@ ACT_WINDOW_SECONDS = 0.75  # 활동선(점선) 표시 전용 짧은 윈도우 �
 FAIL_TRANSITIONS = 7      # 1초 내 방향전환 ≥7회 (= >3 flash = >6 transition)
 PACE_SAFE_60HZ = 0.334    # leading edge 간격 ≥334ms면 안전 (60Hz 환경)
 PACE_SAFE_50HZ = 0.360    # ≥360ms면 안전 (50Hz 환경)
+
 EXTENDED_SECONDS = 5.0    # 5초 지속 플래시 경고
 
 # 공간 패턴(줄무늬) 기준 — Harding/Wilkins
@@ -51,6 +52,105 @@ PATTERN_LIGHT_CD = 50.0       # 가장 밝은 줄무늬 > 50 cd/m²
 PATTERN_AREA_STATIC = 0.40    # 정지 패턴: 화면 >40%
 PATTERN_AREA_MOVING = 0.25    # 움직임/점멸/반전 패턴: 화면 >25%
 PATTERN_MIN_SECONDS = 0.5     # ≥0.5초 지속
+
+# ── 휘도 FAIL 검증 게이트 (10° 로컬 평균 휘도 기반) ──
+# 픽셀-면적 파이프라인은 실사 모션(카메라 팬/흔들림/피사체 이동)에서 전환을
+# 과카운트한다. 진짜 플래시는 10° 시야각 '평균' 휘도가 실제로 진동하거나
+# (반전 다수), 1초 내 대형 스윙(빠른 감광 스윕 — PEAT 실측상 FAIL)을 동반한다.
+# QA 1차(2026-08-26) 8개 영상 실측: 게이트 = 반전≥6 OR 스윙≥70cd가
+# PEAT FAIL 지점 11곳 전원 보존 + 위양성 11곳 중 7곳 차단.
+GATE_GRID = (12, 16)        # 로컬 평균 지도 해상도 (유효영역 다운샘플)
+GATE_REV_DELTA_CD = 10.0    # 로컬 평균 반전 인정 스윙 (cd/m²)
+GATE_MIN_REVERSALS = 6      # 1초 내 반전수 — 이 이상이면 진짜 점멸
+GATE_MIN_SWING_CD = 70.0    # 1초 내 로컬 평균 스윙 — 이 이상이면 대형 스윕(유해)
+# corr 데드존 구제: signs_reversed 상관이 ±0.02 안(모션/점멸 판별 불능)일 때
+# 로컬 평균 변화 ≥20cd(WCAG 플래시 정의 상당)이면 전환으로 인정.
+CORR_DEADZONE = 0.02
+DEADZONE_MEAN_DELTA_CD = 20.0
+
+# ── Harding식 픽셀별 전환 추적 (HardingFPA 매뉴얼 기준) ──
+# "각 픽셀이 최근 1초 동안 겪은 전환 수 … 화면(PEAT: 341×256 영역)의 1/4 이상이
+# 7회 이상이면 FAIL", 진단선 = "가장 활발한 25%가 겪은 최소 전환 수".
+# 프레임 단위 카운트는 매 프레임 '다른' 픽셀이 반짝이는 텍스처(물보라)나 카메라 줌도
+# 전환으로 누적하지만, 픽셀별로 세면 같은 영역이 반복 점멸할 때만 높아진다.
+# 판정: 프레임 카운트 FAIL이라도 ±PIX_TOL_S 안에 픽셀 진단 FAIL이 없으면 6으로 클램프.
+PIX_W = 160              # 픽셀 추적 해상도 폭 (저해상도 = 소규모 노이즈 평균화)
+PIX_TOL_S = 0.3          # 프레임 카운트 FAIL과 픽셀 진단 FAIL의 시간 대응 허용치(초)
+PIX_GAMMA = 2.4          # 픽셀 추적기 휘도 환산 감마 — Harding은 방송용 분석기라 BT.1886
+                         # 디스플레이 감마(2.4)를 쓴다. sRGB 대비 어두운 영역이 더 어두워져
+                         # 어두운 배경의 작은 반짝임(Knox 0:37 경기장)이 20cd 미만으로 빠짐
+
+
+class PixelTransitionTracker:
+    """픽셀별 극값 추적 + 최근 1초 전환 수 → 10° 영역 기준 진단값."""
+
+    def __init__(self, window_frames):
+        self.wf = window_frames
+        self.ext = None
+        self.idx = 0
+
+    def update(self, frame_bgr):
+        H, W = frame_bgr.shape[:2]
+        # 축소는 인코딩(감마) 공간에서 먼저 — 비디오 스케일러와 같은 순서
+        f = cv2.resize(frame_bgr, (320, max(1, int(round(H * 320 / W)))),
+                       interpolation=cv2.INTER_AREA)
+        lin = np.power(f[..., ::-1].astype(np.float32) / 255.0, PIX_GAMMA)
+        Lf = (0.2126 * lin[..., 0] + 0.7152 * lin[..., 1] + 0.0722 * lin[..., 2]) * DISPLAY_PEAK_CD
+        L = cv2.resize(Lf.astype(np.float32), (PIX_W, max(1, int(round(H * PIX_W / W)))),
+                       interpolation=cv2.INTER_AREA)
+        if self.ext is None:
+            self.ext = L.copy()
+            self.dr = np.zeros(L.shape, np.int8)
+            self.hist = np.zeros((self.wf,) + L.shape, np.bool_)
+            self.idx = 1
+            return 0
+        harm = harmful_luminance_mask(L, self.ext)
+        sgn = np.sign(L - self.ext).astype(np.int8)
+        trans = harm & (sgn != 0) & (sgn != self.dr)
+        self.ext = np.where(trans, L, self.ext)
+        self.dr = np.where(trans, sgn, self.dr)
+        grow = (~trans) & (((self.dr > 0) & (L > self.ext)) | ((self.dr < 0) & (L < self.ext)))
+        self.ext = np.where(grow, L, self.ext)
+        self.ext = np.where((self.dr == 0) & ~harm, L, self.ext)
+        self.hist[self.idx % self.wf] = trans
+        self.idx += 1
+        C = self.hist.sum(axis=0)
+        d = 0
+        for k in range(1, int(C.max()) + 1):
+            if local_area_fraction(C >= k) >= 0.25:
+                d = k
+            else:
+                break
+        return d
+
+
+TRACE = None  # 디버그 훅: 프레임별 게이트 판정 근거 dict를 받는 콜백 (판정 동작 불변)
+
+
+def local_mean_map(L_cd):
+    """10° 시야각(화면 1/3 박스) 슬라이딩 평균 휘도 지도 — 유효영역을
+    GATE_GRID로 다운샘플. 플래시 검증 게이트/데드존 구제 공용."""
+    H, W = L_cd.shape
+    kh, kw = max(1, H // 3), max(1, W // 3)
+    box = cv2.boxFilter(L_cd, -1, (kw, kh), normalize=True)
+    y0, x0 = kh // 2, kw // 2
+    valid = box[y0:y0 + H - kh + 1, x0:x0 + W - kw + 1]
+    return cv2.resize(valid, (GATE_GRID[1], GATE_GRID[0]),
+                      interpolation=cv2.INTER_AREA)
+
+
+def _sign_corr(s_now, s_prev):
+    """signs_reversed와 동일한 통계량을 (corr, dom) 튜플로 반환 — TRACE 전용."""
+    if s_prev is None:
+        return None, None
+    act_now = np.abs(s_now) > 0.05
+    act_prev = np.abs(s_prev) > 0.05
+    overlap = act_now & act_prev
+    if overlap.any():
+        return float((s_now * s_prev)[overlap].mean()), None
+    if not act_now.any() or not act_prev.any():
+        return None, None
+    return None, float(s_now[act_now].mean() * s_prev[act_prev].mean())
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -269,6 +369,17 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
 
     prev_L_cd = None
     consec_big_times = deque()  # 직전 프레임 대비 화면 급변(장면전환 후보) 시각들
+
+    # 휘도 FAIL 검증 게이트 상태 — 10° 로컬 평균 지도의 위치별 극값 추적
+    gate_ext = None             # 위치별 극값 (GATE_GRID)
+    gate_dir = None             # 위치별 방향 (+1/-1/0)
+    gate_rev_hist = deque()     # (t, 반전 마스크) — 1초 링버퍼
+    gate_m_hist = deque()       # (t, M) — 1초 링버퍼
+    lum_gate_ok = []            # 프레임별: 최근 1초가 '진짜 플래시' 특성인가
+    pix_tracker = PixelTransitionTracker(window_frames)
+    pix_diag = []               # 프레임별 Harding식 픽셀 진단값
+    M_ext = None                # last_ext_L_arr 시점의 로컬 평균 지도 (데드존 구제용)
+
     processed = 0
     frame_idx = -1
 
@@ -291,10 +402,17 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         satmask = sat_ratio >= RED_RATIO_THRESH
         red_val = red_flash_value(rgb_lin)
         L_mean = float(L_cd.mean())
+        M = local_mean_map(L_cd)
         t = processed / effective_fps
 
         # ── 첫 프레임 초기화 ──
         if last_ext_L_arr is None:
+            gate_ext = M.copy()
+            gate_dir = np.zeros(GATE_GRID, np.int8)
+            gate_m_hist.append((t, M))
+            lum_gate_ok.append(False)
+            pix_diag.append(pix_tracker.update(frame))
+            M_ext = M.copy()
             times.append(t)
             lum_area_series.append(0.0)
             red_area_series.append(0.0)
@@ -322,6 +440,32 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
                     "lum_opposing": False, "red_opposing": False,
                 })
             continue
+
+        # ── 휘도 FAIL 검증 게이트: 10° 로컬 평균의 위치별 극값 추적 ──
+        # 반전(스윙 ≥10cd 방향 전환) 마스크와 1초 스윙을 링버퍼로 유지.
+        gate_d = M - gate_ext
+        gate_harm = np.abs(gate_d) >= GATE_REV_DELTA_CD
+        gate_sgn = np.sign(gate_d).astype(np.int8)
+        gate_rev = gate_harm & (gate_dir != 0) & (gate_sgn == -gate_dir)
+        gate_fresh = gate_harm & (gate_dir == 0)
+        gate_upd = gate_rev | gate_fresh
+        gate_ext[gate_upd] = M[gate_upd]
+        gate_dir[gate_upd] = gate_sgn[gate_upd]
+        gate_extend = (~gate_upd) & (gate_sgn == gate_dir) & (gate_dir != 0)
+        gate_ext[gate_extend] = M[gate_extend]
+        gate_rev_hist.append((t, gate_rev))
+        gate_m_hist.append((t, M))
+        while gate_rev_hist and (t - gate_rev_hist[0][0]) > window_seconds:
+            gate_rev_hist.popleft()
+        while gate_m_hist and (t - gate_m_hist[0][0]) > window_seconds:
+            gate_m_hist.popleft()
+        rev_1s = int(np.sum([m for _, m in gate_rev_hist], axis=0).max()) \
+            if gate_rev_hist else 0
+        m_stack = np.stack([m for _, m in gate_m_hist])
+        swing_1s = float((m_stack.max(axis=0) - m_stack.min(axis=0)).max())
+        lum_gate_ok.append(rev_1s >= GATE_MIN_REVERSALS
+                           or swing_1s >= GATE_MIN_SWING_CD)
+        pix_diag.append(pix_tracker.update(frame))
 
         # ── 휘도 플래시: 극값 대비 유해 픽셀의 '방향별' 로컬 면적(10° 시야각) ──
         # 방향까지 로컬 판정: WCAG는 플래시 '영역'의 opposing change 기준이므로
@@ -363,8 +507,14 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
             lum_significant and lum_cur_dir != 0
             and (last_lum_sig_t is None or (t - last_lum_sig_t) > window_seconds)
         )
-        lum_opposing = (lum_opposing_raw and signs_reversed(sign_now, last_ext_sign)) \
-            or lum_burst_start
+        _lum_rev = lum_opposing_raw and signs_reversed(sign_now, last_ext_sign)
+        if lum_opposing_raw and not _lum_rev:
+            # corr 데드존 구제: 부호 상관이 ±0.02 안(모션/점멸 판별 불능)이면
+            # 10° 로컬 평균 변화 ≥20cd(WCAG 플래시 정의 상당)로 전환 인정.
+            _corr, _ = _sign_corr(sign_now, last_ext_sign)
+            if _corr is not None and abs(_corr) <= CORR_DEADZONE:
+                _lum_rev = float(np.abs(M - M_ext).max()) >= DEADZONE_MEAN_DELTA_CD
+        lum_opposing = _lum_rev or lum_burst_start
         if lum_significant:
             last_lum_sig_t = t
         lum_counted = lum_opposing
@@ -404,8 +554,31 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
                     lum_event_flags[i] = True
                 lum_cut_pending = []
 
+        if TRACE is not None and (lum_area > 0.01 or consec_area > 0.01):
+            corr, dom = _sign_corr(sign_now, last_ext_sign)
+            _d = L_cd - last_ext_L_arr
+            _H, _W = _d.shape
+            _kh, _kw = max(1, _H // 3), max(1, _W // 3)
+            _box = cv2.boxFilter(_d, -1, (_kw, _kh), normalize=True)
+            _y0, _x0 = _kh // 2, _kw // 2
+            _valid = _box[_y0:_y0 + _H - _kh + 1, _x0:_x0 + _W - _kw + 1]
+            lmd = float(np.abs(_valid).max())
+            TRACE({
+                "lmd": lmd,
+                "ch": "lum", "t": t, "area": lum_area,
+                "up": up_area, "down": down_area,
+                "dir_prev": lum_dir, "dir_cur": lum_cur_dir,
+                "sig": lum_significant, "raw": lum_opposing_raw,
+                "burst": lum_burst_start, "opposing": lum_opposing,
+                "counted": lum_counted, "consec": consec_area,
+                "corr": corr, "dom": dom,
+                "pace_pending": lum_pending_idx is not None,
+                "cut_pending": len(lum_cut_pending),
+            })
+
         if lum_opposing:
             last_ext_L_mean, last_ext_L_arr = L_mean, L_cd.copy()
+            M_ext = M.copy()
             if np.abs(sign_now).max() > 0.05:
                 last_ext_sign = sign_now
             lum_dir = lum_cur_dir
@@ -414,11 +587,13 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
             # 반전 후보였으나 동일 영역 반전 아님(모션) → 카운트 없이 방향/극값만 전환.
             # (상태를 갱신해야 다음 실제 반전을 놓치지 않는다)
             last_ext_L_mean, last_ext_L_arr = L_mean, L_cd.copy()
+            M_ext = M.copy()
             if np.abs(sign_now).max() > 0.05:
                 last_ext_sign = sign_now
             lum_dir = lum_cur_dir
         elif lum_cur_dir != 0 and (lum_dir == 0 or lum_cur_dir == lum_dir):
             last_ext_L_mean, last_ext_L_arr = L_mean, L_cd.copy()
+            M_ext = M.copy()
             # 유해 변화가 있었을 때만 부호 지도 갱신 — 조용한 프레임이
             # 직전 점멸의 방향 기록을 지워버리지 않도록.
             if np.abs(sign_now).max() > 0.05:
@@ -514,16 +689,28 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
 
         if on_frame is not None:
             # 실시간 1초 윈도우 카운트 — 페이싱 소급 카운트 반영 위해 flags 꼬리 합산
+            _lw_cnt = int(np.count_nonzero(lum_event_flags[-window_frames:]))
+            if _lw_cnt >= FAIL_TRANSITIONS and (
+                    not any(lum_gate_ok[-window_frames:])
+                    or max(pix_diag[-(int(round(PIX_TOL_S * effective_fps)) + 1):]) < FAIL_TRANSITIONS):
+                _lw_cnt = FAIL_TRANSITIONS - 1
+            _la_cnt = float(np.count_nonzero(lum_event_flags[-act_frames:]) * act_scale)
+            if _lw_cnt < FAIL_TRANSITIONS:
+                _la_cnt = min(_la_cnt, float(_lw_cnt))
+            _rw_cnt = int(np.count_nonzero(red_event_flags[-window_frames:]))
+            _ra_cnt = float(np.count_nonzero(red_event_flags[-act_frames:]) * act_scale)
+            if _rw_cnt < FAIL_TRANSITIONS:
+                _ra_cnt = min(_ra_cnt, float(_rw_cnt))
             on_frame({
                 "time": t, "processed": processed, "total": total_proc,
                 "lum_area": lum_area, "red_area": red_area,
                 "sat_area": sat_area_series[-1],
-                "lum_window_count": int(np.count_nonzero(lum_event_flags[-window_frames:])),
-                "red_window_count": int(np.count_nonzero(red_event_flags[-window_frames:])),
-                "lum_window_raw_count": int(np.count_nonzero(lum_raw_flags[-window_frames:])),
+                "lum_window_count": _lw_cnt,
+                "red_window_count": _rw_cnt,
+                "lum_window_raw_count": int(pix_diag[-1]),
                 "red_window_raw_count": int(np.count_nonzero(red_raw_flags[-window_frames:])),
-                "lum_act_count": float(np.count_nonzero(lum_event_flags[-act_frames:]) * act_scale),
-                "red_act_count": float(np.count_nonzero(red_event_flags[-act_frames:]) * act_scale),
+                "lum_act_count": _la_cnt,
+                "red_act_count": _ra_cnt,
                 "pattern_hit": pattern_hit,
                 "lum_opposing": lum_counted,
                 "red_opposing": red_counted,
@@ -545,11 +732,39 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
 
     lum_window = windowed_count(lum_flags)
     red_window = windowed_count(red_flags)
-    lum_window_raw = windowed_count(np.array(lum_raw_flags, dtype=bool))
+
+    # 휘도 FAIL 검증 게이트 적용: FAIL(≥7) 윈도우라도 최근 1초에 '진짜 플래시'
+    # 특성(로컬 평균 반전 다수 또는 대형 스윙)이 전혀 없으면 모션 과카운트로 보고
+    # FAIL 직전(6)으로 클램프. 게이트 통과는 1초 윈도우로 확장해 FAIL 구간이
+    # 끝자락에서 잘게 쪼개지지 않게 한다.
+    gate_arr = np.array(lum_gate_ok, dtype=bool)
+    gate_win = windowed_count(gate_arr) > 0
+    lum_window = np.where((lum_window >= FAIL_TRANSITIONS) & ~gate_win,
+                          FAIL_TRANSITIONS - 1, lum_window).astype(np.int32)
+
+    # Harding식 픽셀 진단 게이트: ±PIX_TOL_S 안에 픽셀 진단 FAIL이 없으면 클램프
+    pix_arr = np.array(pix_diag, dtype=np.int32)
+    tol = max(0, int(round(PIX_TOL_S * effective_fps)))
+    pix_fail = (pix_arr >= FAIL_TRANSITIONS).astype(np.uint8)
+    pix_ok = cv2.dilate(pix_fail.reshape(1, -1), np.ones((1, 2 * tol + 1), np.uint8)).ravel() > 0 \
+        if len(pix_fail) else np.zeros(0, bool)
+    lum_window = np.where((lum_window >= FAIL_TRANSITIONS) & ~pix_ok,
+                          FAIL_TRANSITIONS - 1, lum_window).astype(np.int32)
+    lum_window_raw = pix_arr  # 진단선 = 가장 활발한 25%의 픽셀별 전환 수 (Harding 정의)
     red_window_raw = windowed_count(np.array(red_raw_flags, dtype=bool))
     # 활동선(점선) 표시용: 0.5초 윈도우 카운트를 초당 환산 — 판정과 무관
     lum_window_act = windowed_count(lum_flags, act_frames).astype(np.float32) * act_scale
     red_window_act = windowed_count(red_flags, act_frames).astype(np.float32) * act_scale
+    # 활동선(점선)은 판정이 FAIL 미만인 구간에서만 판정 카운트로 상한 캡 —
+    # 0.75초 창의 초당 환산값이 판정(1초 창)보다 커져 점선만 FAIL 경계를 넘는
+    # 차트-판정 불일치 방지(게이트 클램프도 이 캡으로 점선에 자동 반영).
+    # 판정 FAIL(≥7) 구간은 캡 없이 그대로 — 공식 PEAT 점선의 천장 치솟음 유지.
+    lum_window_act = np.where(lum_window < FAIL_TRANSITIONS,
+                              np.minimum(lum_window_act, lum_window.astype(np.float32)),
+                              lum_window_act)
+    red_window_act = np.where(red_window < FAIL_TRANSITIONS,
+                              np.minimum(red_window_act, red_window.astype(np.float32)),
+                              red_window_act)
 
     lum_fail = bool((lum_window >= FAIL_TRANSITIONS).any())
     red_fail = bool((red_window >= FAIL_TRANSITIONS).any())
@@ -661,14 +876,17 @@ def count_to_band_y(counts, band_top):
 
 def count_to_activity_y(counts, band_top, ymax):
     """활동선(점선)용 확장 매핑: 밴드 경계까지는 count_to_band_y와 동일하되,
-    FAIL 이상 카운트는 밴드를 뚫고 차트 천장(0.95·ymax)까지 치솟는다 —
-    공식 PEAT 결과창(ex.png)의 'Luminance flash' 점선 모양. diag(실선)는
-    count_to_band_y로 밴드 안에 머물러 두 선이 구분된다.
-    천장은 FAIL+3부터 — 공식 PEAT처럼 FAIL을 확실히 넘긴 구간은 천장에 붙는다."""
+    FAIL 이상 카운트는 FAIL 밴드를 지나 넘은 만큼 완만하게 올라간다 —
+    FAIL+1에서 밴드 상단, 3×FAIL에서 차트 천장(0.95·ymax). 공식 PEAT는
+    FAIL을 살짝 넘긴 구간(Super Speed 7초, Lint filter 19초)은 밴드 바로 위에,
+    크게 넘긴 구간만 천장 근처에 그린다. diag(실선)는 count_to_band_y로
+    밴드 안에 머물러 두 선이 구분된다."""
     onethird = max(1, FAIL_TRANSITIONS // 3)
     xp = [0.0, float(onethird), float(FAIL_TRANSITIONS - 1),
-          float(FAIL_TRANSITIONS), float(FAIL_TRANSITIONS + 3)]
-    fp = [0.0, 0.25 * band_top, 0.50 * band_top, 0.75 * band_top, 0.95 * ymax]
+          float(FAIL_TRANSITIONS), float(FAIL_TRANSITIONS + 1),
+          float(FAIL_TRANSITIONS * 3)]
+    fp = [0.0, 0.25 * band_top, 0.50 * band_top, 0.75 * band_top, band_top,
+          0.95 * ymax]
     return np.interp(np.asarray(counts, dtype=np.float32), xp, fp).astype(np.float32)
 
 
