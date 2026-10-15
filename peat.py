@@ -124,6 +124,14 @@ class PixelTransitionTracker:
         return d
 
 
+# ── 플래시 세기 게이트 ──
+# PEAT 설명서: 위험도(점선) 높이는 "깜빡임의 밝기와 깜빡이는 면적"으로 정해지고, Harding은
+# 위험도 선이 합격선을 넘을 때 FAIL. 즉 횟수(≥7)만이 아니라 세기도 필요하다.
+# 1초 창 안 카운트된 전환들의 '10° 영역 평균 휘도 변화' 중간값이 이 값 미만이면 클램프.
+# QA 1차 실측: PEAT 무이슈 Ballie 30초 10.7cd 제거, PEAT FAIL 최소 Knox 2:55 11.6cd 보존.
+# (Super Speed 5.7초 11.1cd는 Knox 2:55와 0.5cd 차이라 분리 불가 — 12 이상은 2:55 누락)
+LUM_MIN_WINDOW_INTENSITY_CD = 11.0
+
 TRACE = None  # 디버그 훅: 프레임별 게이트 판정 근거 dict를 받는 콜백 (판정 동작 불변)
 
 
@@ -137,6 +145,14 @@ def local_mean_map(L_cd):
     valid = box[y0:y0 + H - kh + 1, x0:x0 + W - kw + 1]
     return cv2.resize(valid, (GATE_GRID[1], GATE_GRID[0]),
                       interpolation=cv2.INTER_AREA)
+
+
+def _window_mean_delta(L_cd, ext_arr):
+    """극값 대비 10° 영역(화면 1/3 박스) 평균 휘도 변화의 최대 절댓값(cd/m²)."""
+    H, W = L_cd.shape
+    kh, kw = max(1, H // 3), max(1, W // 3)
+    box = cv2.boxFilter(L_cd - ext_arr, -1, (kw, kh), normalize=True)
+    return float(np.abs(box[kh // 2:kh // 2 + H - kh + 1, kw // 2:kw // 2 + W - kw + 1]).max())
 
 
 def _sign_corr(s_now, s_prev):
@@ -378,6 +394,7 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
     lum_gate_ok = []            # 프레임별: 최근 1초가 '진짜 플래시' 특성인가
     pix_tracker = PixelTransitionTracker(window_frames)
     pix_diag = []               # 프레임별 Harding식 픽셀 진단값
+    lum_event_mag = [np.nan]    # 프레임별 전환 세기(10° 영역 평균 변화, 전환 없으면 nan)
     M_ext = None                # last_ext_L_arr 시점의 로컬 평균 지도 (데드존 구제용)
 
     processed = 0
@@ -576,6 +593,8 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
                 "cut_pending": len(lum_cut_pending),
             })
 
+        lum_event_mag.append(_window_mean_delta(L_cd, last_ext_L_arr) if lum_opposing else np.nan)
+
         if lum_opposing:
             last_ext_L_mean, last_ext_L_arr = L_mean, L_cd.copy()
             M_ext = M.copy()
@@ -750,6 +769,22 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         if len(pix_fail) else np.zeros(0, bool)
     lum_window = np.where((lum_window >= FAIL_TRANSITIONS) & ~pix_ok,
                           FAIL_TRANSITIONS - 1, lum_window).astype(np.int32)
+    # 플래시 세기 게이트: 1초 창 안 카운트된 전환 세기의 중간값이 기준 미만이면 클램프
+    mags = np.array(lum_event_mag[:len(lum_flags)], dtype=np.float32)
+    counted_mag = np.where(lum_flags & ~np.isnan(mags), mags, np.nan)
+    areas = np.array(lum_area_series[:len(lum_flags)], dtype=np.float32)
+    win_med = np.zeros(len(lum_flags), np.float32)    # 1초 창 전환 세기 중간값(cd/m²)
+    win_area = np.zeros(len(lum_flags), np.float32)   # 1초 창 전환 면적 중간값(10° 영역 비율)
+    for i in np.nonzero(lum_window > 0)[0]:
+        lo = max(0, i - window_frames + 1)
+        sel = ~np.isnan(counted_mag[lo:i + 1])
+        if sel.any():
+            win_med[i] = float(np.median(counted_mag[lo:i + 1][sel]))
+            win_area[i] = float(np.median(areas[lo:i + 1][sel]))
+    lum_window = np.where((lum_window >= FAIL_TRANSITIONS)
+                          & (win_med < LUM_MIN_WINDOW_INTENSITY_CD),
+                          FAIL_TRANSITIONS - 1, lum_window).astype(np.int32)
+
     lum_window_raw = pix_arr  # 진단선 = 가장 활발한 25%의 픽셀별 전환 수 (Harding 정의)
     red_window_raw = windowed_count(np.array(red_raw_flags, dtype=bool))
     # 활동선(점선) 표시용: 0.5초 윈도우 카운트를 초당 환산 — 판정과 무관
@@ -815,6 +850,8 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
     return {
         "times": np.array(times),
         "lum_area": np.array(lum_area_series),
+        "lum_intensity": win_med,
+        "lum_flash_area": win_area,
         "red_area": np.array(red_area_series),
         "sat_area": np.array(sat_area_series),
         "lum_window": lum_window,
@@ -874,20 +911,33 @@ def count_to_band_y(counts, band_top):
     return np.interp(np.asarray(counts, dtype=np.float32), xp, fp).astype(np.float32)
 
 
-def count_to_activity_y(counts, band_top, ymax):
-    """활동선(점선)용 확장 매핑: 밴드 경계까지는 count_to_band_y와 동일하되,
-    FAIL 이상 카운트는 FAIL 밴드를 지나 넘은 만큼 완만하게 올라간다 —
-    FAIL+1에서 밴드 상단, 3×FAIL에서 차트 천장(0.95·ymax). 공식 PEAT는
-    FAIL을 살짝 넘긴 구간(Super Speed 7초, Lint filter 19초)은 밴드 바로 위에,
-    크게 넘긴 구간만 천장 근처에 그린다. diag(실선)는 count_to_band_y로
-    밴드 안에 머물러 두 선이 구분된다."""
-    onethird = max(1, FAIL_TRANSITIONS // 3)
-    xp = [0.0, float(onethird), float(FAIL_TRANSITIONS - 1),
-          float(FAIL_TRANSITIONS), float(FAIL_TRANSITIONS + 1),
-          float(FAIL_TRANSITIONS * 3)]
-    fp = [0.0, 0.25 * band_top, 0.50 * band_top, 0.75 * band_top, band_top,
-          0.95 * ymax]
-    return np.interp(np.asarray(counts, dtype=np.float32), xp, fp).astype(np.float32)
+# 점선(위험도) 높이 공식 — QA 1차 PEAT 스크린샷 16개 피크를 픽셀 단위로 실측해 맞춘 값.
+# 높이 h(0=FAIL 경계, 1=천장) = (깜빡임 면적 − 0.40)/0.64 + 0.17 × (픽셀 진단 횟수 − 7).
+# PEAT 설명서("높이는 밝기와 면적") 그대로 면적이 주 요인. 평균 오차 0.13(이전 횟수×세기 0.28).
+RISK_AREA_OFFSET = 0.40
+RISK_AREA_SCALE = 0.64
+RISK_COUNT_GAIN = 0.17
+
+
+def count_to_activity_y(counts, band_top, ymax, area=None, pix=None):
+    """활동선(점선) = PEAT '위험도 선' 근사. 횟수는 진단선(실선)이 세므로 점선은
+      - FAIL 근처가 아니면 바닥(≤4회 → 0) — 약한 활동은 실선에만 보인다
+      - 5·6회는 경고 수준으로 CAUTION 밴드 안, 7회는 FAIL 밴드 하단
+      - FAIL 이상은 깜빡임 면적(area, 1초 창 중간값)과 픽셀 진단 횟수(pix)로 높이 결정
+    area/pix가 없으면(실시간 그리기) 횟수만으로 근사한다."""
+    c = np.asarray(counts, dtype=np.float32)
+    fail = float(FAIL_TRANSITIONS)
+    line = 0.75 * band_top
+    below = np.interp(c, [0.0, fail - 3, fail - 2, fail - 1, fail],
+                      [0.0, 0.0, 0.25 * band_top, 0.5 * band_top, line])
+    if area is not None and pix is not None:
+        h = (np.asarray(area, dtype=np.float32) - RISK_AREA_OFFSET) / RISK_AREA_SCALE \
+            + RISK_COUNT_GAIN * (np.asarray(pix, dtype=np.float32) - fail)
+    else:
+        h = (c - fail) / 9.0
+    h = np.clip(h, 0.03, 1.0)
+    above = line + h * (0.95 * ymax - line)
+    return np.where(c < fail, below, above).astype(np.float32)
 
 
 def print_summary(metrics):
@@ -925,7 +975,8 @@ def plot_unified(metrics):
     # 점선(활동선) = 판정 카운트 — FAIL 초과 시 밴드를 뚫고 천장까지 (ex.png 모양).
     # 실선(diag) = 게이트(모션 제외) 전 원시 반전 후보의 '플래시 수'(전환÷2) —
     # 공식 PEAT diag처럼 낮은 활동까지 길게 이어지고 정점이 CAUTION(FAIL) 부근에 머묾.
-    lum_act = count_to_activity_y(metrics["lum_window_act"], band_top, ymax)
+    lum_act = count_to_activity_y(metrics["lum_window_act"], band_top, ymax,
+                                  metrics.get("lum_flash_area"), metrics.get("lum_window_raw"))
     red_act = count_to_activity_y(metrics["red_window_act"], band_top, ymax)
     lum_cnt = count_to_band_y(metrics["lum_window_raw"] / 2.0, band_top)
     red_cnt = count_to_band_y(metrics["red_window_raw"] / 2.0, band_top)

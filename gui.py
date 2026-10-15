@@ -535,14 +535,15 @@ class PEATMainWindow(QMainWindow):
         self.progress_bar.setMaximum(max(1, total))
         self.progress_bar.setValue(current)
 
-    def _draw_band_curves(self, t, lum_act, red_act, lum_raw, red_raw):
+    def _draw_band_curves(self, t, lum_act, red_act, lum_raw, red_raw, lum_area=None):
         """밴드 매핑 곡선 갱신 — peat.py plot_unified와 동일 로직.
         점선(활동선) = 짧은 표시 윈도우 카운트의 초당 환산, FAIL 초과 시 밴드를
         뚫고 천장까지(ex.png 모양). 실선(diag) = 게이트 전 원시 반전 후보의
         '플래시 수'(전환÷2) — 공식 PEAT diag 스케일. band_top을 반환."""
         ymax = 10.0
         band_top = ymax * BAND_TOP_FRAC
-        self.curve_lum_act.setData(t, count_to_activity_y(lum_act, band_top, ymax))
+        self.curve_lum_act.setData(t, count_to_activity_y(
+            lum_act, band_top, ymax, lum_area, None if lum_area is None else lum_raw))
         self.curve_red_act.setData(t, count_to_activity_y(red_act, band_top, ymax))
         self.curve_lum_diag.setData(t, count_to_band_y(lum_raw / 2.0, band_top))
         self.curve_red_diag.setData(t, count_to_band_y(red_raw / 2.0, band_top))
@@ -587,7 +588,9 @@ class PEATMainWindow(QMainWindow):
             lum_act = np.array(summary.get("lum_window_act", summary["lum_window"]), dtype=np.float32)
             red_act = np.array(summary.get("red_window_act", summary["red_window"]), dtype=np.float32)
             ext = np.array(summary["extended_series"], dtype=np.float32)
-            band_top = self._draw_band_curves(t, lum_act, red_act, lum_raw, red_raw)
+            lum_area = summary.get("lum_flash_area")
+            band_top = self._draw_band_curves(t, lum_act, red_act, lum_raw, red_raw,
+                                              None if lum_area is None else np.asarray(lum_area))
 
             # Extended Flash (파란선) — ≥0.8일 때만 표시
             self.curve_extended.setData(t, np.where(ext >= 0.8, ext * band_top, 0.0))

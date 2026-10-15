@@ -75,4 +75,6 @@ class AnalysisWorker(QThread):
         summary["lum_window_act"] = metrics["lum_window_act"].tolist()
         summary["red_window_act"] = metrics["red_window_act"].tolist()
         summary["extended_series"] = metrics["extended_series"].tolist()
+        summary["lum_intensity"] = metrics["lum_intensity"].tolist()
+        summary["lum_flash_area"] = metrics["lum_flash_area"].tolist()
         self.finished.emit(summary)
