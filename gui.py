@@ -22,7 +22,7 @@ from worker import AnalysisWorker
 from peat import (
     FAIL_TRANSITIONS, RED_RATIO_THRESH, RED_DELTA_THRESH, BAND_TOP_FRAC,
     count_to_band_y, count_to_activity_y,
-    bgr_to_rgb01, linearize_srgb, luminance_cd,
+    bgr_to_rgb01, linearize_video, luminance_cd,
     harmful_luminance_mask, saturated_red_ratio, red_flash_value,
 )
 
@@ -153,6 +153,7 @@ class PEATMainWindow(QMainWindow):
         self.lum_window_counts = []
         self.red_window_counts = []
         self.lum_raw_counts = []
+        self.lum_conc = []
         self.red_raw_counts = []
         self.lum_act_counts = []
         self.red_act_counts = []
@@ -476,6 +477,7 @@ class PEATMainWindow(QMainWindow):
         self.lum_window_counts.clear()
         self.red_window_counts.clear()
         self.lum_raw_counts.clear()
+        self.lum_conc.clear()
         self.red_raw_counts.clear()
         self.lum_act_counts.clear()
         self.red_act_counts.clear()
@@ -558,6 +560,7 @@ class PEATMainWindow(QMainWindow):
         self.red_raw_counts.append(data.get("red_window_raw_count", 0))
         self.lum_act_counts.append(data.get("lum_act_count", data["lum_window_count"]))
         self.red_act_counts.append(data.get("red_act_count", data["red_window_count"]))
+        self.lum_conc.append(data.get("lum_concurrent", 0.0))
 
         t_arr = np.array(self.times)
         lum_window = np.array(self.lum_window_counts, dtype=np.float32)
@@ -566,7 +569,8 @@ class PEATMainWindow(QMainWindow):
         red_raw = np.array(self.red_raw_counts, dtype=np.float32)
         lum_act = np.array(self.lum_act_counts, dtype=np.float32)
         red_act = np.array(self.red_act_counts, dtype=np.float32)
-        self._draw_band_curves(t_arr, lum_act, red_act, lum_raw, red_raw)
+        self._draw_band_curves(t_arr, lum_act, red_act, lum_raw, red_raw,
+                               np.array(self.lum_conc, dtype=np.float32))
 
         # 실시간 상태
         self.lbl_status.setText(
@@ -588,7 +592,7 @@ class PEATMainWindow(QMainWindow):
             lum_act = np.array(summary.get("lum_window_act", summary["lum_window"]), dtype=np.float32)
             red_act = np.array(summary.get("red_window_act", summary["red_window"]), dtype=np.float32)
             ext = np.array(summary["extended_series"], dtype=np.float32)
-            lum_area = summary.get("lum_flash_area")
+            lum_area = summary.get("lum_concurrent")
             band_top = self._draw_band_curves(t, lum_act, red_act, lum_raw, red_raw,
                                               None if lum_area is None else np.asarray(lum_area))
 
@@ -870,8 +874,8 @@ class PEATMainWindow(QMainWindow):
     def _violation_masks(frame, prev_frame):
         """직전 프레임 대비 위반 픽셀 마스크 (휘도 유해 변화, 적색 전환).
         분석 루프는 극값 대비지만, 시각화는 프레임간 변화로도 위반 위치를 충분히 보여준다."""
-        lin_now = linearize_srgb(bgr_to_rgb01(frame))
-        lin_prev = linearize_srgb(bgr_to_rgb01(prev_frame))
+        lin_now = linearize_video(bgr_to_rgb01(frame))
+        lin_prev = linearize_video(bgr_to_rgb01(prev_frame))
         lum_mask = harmful_luminance_mask(luminance_cd(lin_now), luminance_cd(lin_prev))
         sat_now = saturated_red_ratio(lin_now) >= RED_RATIO_THRESH
         sat_prev = saturated_red_ratio(lin_prev) >= RED_RATIO_THRESH
