@@ -778,12 +778,20 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
     pattern_min_frames = max(1, int(round(PATTERN_MIN_SECONDS * effective_fps)))
     pattern_fail = _has_run(pattern_arr, pattern_min_frames)
 
-    # 확장 플래시(Extended Flash): 5초 윈도우의 80% 프레임에서 실패의 1/3 이상 플래시
-    # (PEAT User Guide 원문 정의). 시계열 = 최근 5초 내 flash_active 비율.
+    # 확장 플래시(Extended Flash): HardingFPA 설명서(How to interpret results Q19~21) —
+    # '실패 직전의 경고 수준' 플래시가 최근 5초의 80% 이상 지속되면 발생. 실제 FAIL 중에는
+    # 꺼지고, 진단선이 CAUTION 밴드 아래로 내려가도 꺼진다. 이전엔 FAIL 프레임까지 '활동'으로
+    # 쳐서 연속 FAIL 구간(Knox 0:15·1:40)마다 파란선이 떴지만 PEAT엔 없음.
+    # 경고 수준 = 3전환(≈2 flash) 이상: 2전환(1 flash)로 두면 일상적 장면 변화만으로도
+    # 5초 80%를 채워 Knox 0:39·1:42, Ballie 40~50초에 남음. QA 1차 PEAT는 전 영상 Extended 없음.
     extended_frames = max(1, int(round(EXTENDED_SECONDS * effective_fps)))
     onethird = max(1, FAIL_TRANSITIONS // 3)  # 실패(7전환)의 1/3 ≈ 2전환 = 1 flash
-    flash_active = (lum_window >= onethird) | (red_window >= onethird)
-    extended_series = _rolling_mean(flash_active.astype(np.float32), extended_frames)
+    EXT_WARN_TRANSITIONS = FAIL_TRANSITIONS // 2  # 3
+    flash_fail = (lum_window >= FAIL_TRANSITIONS) | (red_window >= FAIL_TRANSITIONS)
+    flash_warn = ((lum_window >= EXT_WARN_TRANSITIONS) | (red_window >= EXT_WARN_TRANSITIONS)) & ~flash_fail
+    diag_caution = (lum_window_raw >= onethird) | (red_window_raw >= onethird)
+    extended_series = _rolling_mean(flash_warn.astype(np.float32), extended_frames)
+    extended_series = np.where(flash_fail | ~diag_caution, 0.0, extended_series).astype(np.float32)
     extended_warn = bool((extended_series >= 0.8).any())
 
     # ── 4단계 판정 (공식 PEAT 밴드: PASS / CAUTION(PASS) / CAUTION(FAIL) / FAIL) ──
@@ -892,6 +900,9 @@ RISK_TOPK = 7
 RISK_CONC_OFFSET = 0.51
 RISK_CONC_SCALE = 0.23
 RISK_COUNT_GAIN = 0.075
+# FAIL 확정 구간의 최소 높이 — PEAT는 딱 7회 FAIL(Lint 19초 0.17, Smart Motion 6초 0.06)도
+# 합격선 위로 눈에 띄게 솟는다. 0.03이면 선에 붙어 보여 낮게 보였음(평균 오차 0.119→0.117).
+RISK_MIN_H = 0.10
 
 
 def count_to_activity_y(counts, band_top, ymax, conc=None, pix=None):
@@ -910,7 +921,7 @@ def count_to_activity_y(counts, band_top, ymax, conc=None, pix=None):
             + RISK_COUNT_GAIN * (np.asarray(pix, dtype=np.float32) - fail)
     else:
         h = (c - fail) / 9.0
-    h = np.clip(h, 0.03, 1.0)
+    h = np.clip(h, RISK_MIN_H, 1.0)
     above = line + h * (0.95 * ymax - line)
     return np.where(c < fail, below, above).astype(np.float32)
 

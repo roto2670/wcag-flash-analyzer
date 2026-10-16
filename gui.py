@@ -19,6 +19,40 @@ import pyqtgraph as pg
 import numpy as np
 
 from worker import AnalysisWorker
+
+
+def fmt_mmss(sec, decimals=0):
+    """초 → 분:초 문자열 (예: 79.5 → '1:19.5')."""
+    sec = max(0.0, float(sec))
+    m, s = divmod(sec, 60.0)
+    if decimals > 0:
+        s = round(s, decimals)
+        if s >= 60.0:
+            m, s = m + 1, 0.0
+        return f"{int(m)}:{s:0{3 + decimals}.{decimals}f}"
+    s = int(round(s))
+    if s == 60:
+        m, s = m + 1, 0
+    return f"{int(m)}:{s:02d}"
+
+
+class TimeAxisItem(pg.AxisItem):
+    """x축 눈금을 분:초로 표시. 눈금 간격도 시간 단위(1·2·5·10·15·30초, 1·2·5·10분)로 잡는다."""
+    STEPS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600]
+
+    def tickSpacing(self, minVal, maxVal, size):
+        span = maxVal - minVal
+        if span <= 0 or size <= 0:
+            return super().tickSpacing(minVal, maxVal, size)
+        target = span / max(2.0, size / 80.0)   # 눈금 사이 최소 ~80px
+        major = next((st for st in self.STEPS if st >= target), self.STEPS[-1])
+        i = self.STEPS.index(major)
+        minor = self.STEPS[i - 1] if i > 0 else major / 2
+        return [(major, 0), (minor, 0)]
+
+    def tickStrings(self, values, scale, spacing):
+        dec = 1 if spacing < 1 else 0
+        return [fmt_mmss(v, dec) for v in values]
 from peat import (
     FAIL_TRANSITIONS, RED_RATIO_THRESH, RED_DELTA_THRESH, BAND_TOP_FRAC,
     count_to_band_y, count_to_activity_y,
@@ -261,14 +295,14 @@ class PEATMainWindow(QMainWindow):
         chart_inner.setContentsMargins(8, 8, 8, 8)
 
         pg.setConfigOptions(antialias=True, useOpenGL=False)
-        self.plot_widget = pg.PlotWidget()
+        self.plot_widget = pg.PlotWidget(axisItems={"bottom": TimeAxisItem(orientation="bottom")})
         self.plot_widget.setBackground("#cfd2d6")
         self.plot_widget.showGrid(x=True, y=False, alpha=0.3)
         self.plot_widget.setYRange(0, 10)
         self.plot_widget.hideAxis("left")
 
         x_axis = self.plot_widget.getAxis("bottom")
-        x_axis.setLabel("Time (s)", color="#222")
+        x_axis.setLabel("Time (m:ss)", color="#222")
         x_axis.setTickFont(QFont("Malgun Gothic", 10, QFont.Bold))
         x_axis.setPen(pg.mkPen(color="#333", width=2))
         x_axis.setTextPen(pg.mkPen(color="#222"))
@@ -574,7 +608,7 @@ class PEATMainWindow(QMainWindow):
 
         # 실시간 상태
         self.lbl_status.setText(
-            f"분석 중... | 시간: {data['time']:.1f}s | "
+            f"분석 중... | 시간: {fmt_mmss(data['time'], 1)} | "
             f"휘도 최대: {int(lum_window.max())} | 적색 최대: {int(red_window.max())}"
         )
 
@@ -730,6 +764,7 @@ class PEATMainWindow(QMainWindow):
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from matplotlib.backends.backend_pdf import PdfPages
+        from matplotlib.ticker import FuncFormatter
 
         t = np.array(self.times)
         lum_counts = np.array(self.lum_window_counts, dtype=np.float32)
@@ -741,7 +776,8 @@ class PEATMainWindow(QMainWindow):
             ax.plot(t, lum_counts, color="white", linewidth=1.5, label="Luminance flash")
             ax.plot(t, red_counts, color="red", linewidth=1.5, label="Red flash")
             ax.axhline(y=FAIL_TRANSITIONS, color="black", linestyle="--", label=f"FAIL ({FAIL_TRANSITIONS})")
-            ax.set_xlabel("Time (s)")
+            ax.set_xlabel("Time (m:ss)")
+            ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: fmt_mmss(v)))
             ax.set_ylabel("Transitions / 1s window")
             ax.set_title(f"WCAG 2.3.1 Flash Analysis — {self.lbl_verdict.text()}")
             ax.legend()
@@ -808,13 +844,13 @@ class PEATMainWindow(QMainWindow):
             if caution_segs:
                 lines = ["<b>⚠️ CAUTION 구간:</b><br>"]
                 for s, e in caution_segs:
-                    lines.append(f'<a href="time:{s:.2f}" style="color:#e0af68; text-decoration:none;">▶ {s:.2f}s ~ {e:.2f}s</a><br>')
+                    lines.append(f'<a href="time:{s:.2f}" style="color:#e0af68; text-decoration:none;">▶ {fmt_mmss(s, 2)} ~ {fmt_mmss(e, 2)}</a><br>')
                 return "".join(lines)
             return "위험 구간 없음"
 
         lines = ["<b>🚨 FAIL 구간:</b><br>"]
         for s, e in segments:
-            lines.append(f'<a href="time:{s:.2f}" style="color:#f7768e; text-decoration:none;">▶ {s:.2f}s ~ {e:.2f}s</a><br>')
+            lines.append(f'<a href="time:{s:.2f}" style="color:#f7768e; text-decoration:none;">▶ {fmt_mmss(s, 2)} ~ {fmt_mmss(e, 2)}</a><br>')
         return "".join(lines)
 
     # ──────────────────────────────────────────────────────────────────
