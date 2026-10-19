@@ -621,6 +621,11 @@ class PEATMainWindow(QMainWindow):
             t = np.array(summary["times"])
             lum_window = np.array(summary["lum_window"], dtype=np.float32)
             red_window = np.array(summary["red_window"], dtype=np.float32)
+            # 실시간 누적값을 최종값으로 교체 — FAIL 구간 링크·PDF가 판정과 같은 값을 쓰도록
+            # (실시간은 픽셀 진단 ±0.3초 중 과거만 보고, 소급 카운트도 덜 반영됨)
+            self.times = list(summary["times"])
+            self.lum_window_counts = lum_window.tolist()
+            self.red_window_counts = red_window.tolist()
             lum_raw = np.array(summary.get("lum_window_raw", summary["lum_window"]), dtype=np.float32)
             red_raw = np.array(summary.get("red_window_raw", summary["red_window"]), dtype=np.float32)
             lum_act = np.array(summary.get("lum_window_act", summary["lum_window"]), dtype=np.float32)
