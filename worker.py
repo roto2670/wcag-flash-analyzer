@@ -76,4 +76,5 @@ class AnalysisWorker(QThread):
         summary["red_window_act"] = metrics["red_window_act"].tolist()
         summary["extended_series"] = metrics["extended_series"].tolist()
         summary["lum_risk"] = metrics["lum_risk"].tolist()
+        summary["red_risk"] = metrics["red_risk"].tolist()
         self.finished.emit(summary)

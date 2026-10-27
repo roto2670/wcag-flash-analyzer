@@ -54,10 +54,9 @@ class TimeAxisItem(pg.AxisItem):
         dec = 1 if spacing < 1 else 0
         return [fmt_mmss(v, dec) for v in values]
 from peat import (
-    FAIL_TRANSITIONS, RED_RATIO_THRESH, RED_DELTA_THRESH, BAND_TOP_FRAC,
+    FAIL_TRANSITIONS, BAND_TOP_FRAC,
     count_to_band_y, count_to_activity_y,
-    bgr_to_rgb01, linearize_video, peat_flash_mask,
-    saturated_red_ratio, red_flash_value,
+    peat_flash_mask, peat_red_mask,
 )
 
 
@@ -188,6 +187,7 @@ class PEATMainWindow(QMainWindow):
         self.red_window_counts = []
         self.lum_raw_counts = []
         self.lum_risk = []
+        self.red_risk = []
         self.red_raw_counts = []
         self.lum_act_counts = []
         self.red_act_counts = []
@@ -512,6 +512,7 @@ class PEATMainWindow(QMainWindow):
         self.red_window_counts.clear()
         self.lum_raw_counts.clear()
         self.lum_risk.clear()
+        self.red_risk.clear()
         self.red_raw_counts.clear()
         self.lum_act_counts.clear()
         self.red_act_counts.clear()
@@ -571,14 +572,14 @@ class PEATMainWindow(QMainWindow):
         self.progress_bar.setMaximum(max(1, total))
         self.progress_bar.setValue(current)
 
-    def _draw_band_curves(self, t, lum_act, red_act, lum_raw, red_raw, lum_risk=None):
+    def _draw_band_curves(self, t, lum_act, red_act, lum_raw, red_raw, lum_risk=None, red_risk=None):
         """밴드 매핑 곡선 갱신 — peat.py plot_unified와 동일 로직.
-        휘도 점선 = PEAT 위험도(lum_risk, 0~3.4), 적색 점선 = 짧은 윈도우 카운트의 초당 환산.
+        점선 = PEAT 위험도(lum_risk/red_risk, 0~3.4).
         실선(diag) = 전환 수의 '플래시 수'(전환÷2) — 공식 PEAT diag 스케일. band_top을 반환."""
         ymax = 10.0
         band_top = ymax * BAND_TOP_FRAC
         self.curve_lum_act.setData(t, count_to_activity_y(lum_act, band_top, ymax, lum_risk))
-        self.curve_red_act.setData(t, count_to_activity_y(red_act, band_top, ymax))
+        self.curve_red_act.setData(t, count_to_activity_y(red_act, band_top, ymax, red_risk))
         self.curve_lum_diag.setData(t, count_to_band_y(lum_raw / 2.0, band_top))
         self.curve_red_diag.setData(t, count_to_band_y(red_raw / 2.0, band_top))
         self.plot_widget.setXRange(0, t[-1] + 0.5, padding=0)
@@ -593,6 +594,7 @@ class PEATMainWindow(QMainWindow):
         self.lum_act_counts.append(data.get("lum_act_count", data["lum_window_count"]))
         self.red_act_counts.append(data.get("red_act_count", data["red_window_count"]))
         self.lum_risk.append(data.get("lum_risk", 0.0))
+        self.red_risk.append(data.get("red_risk", 0.0))
 
         t_arr = np.array(self.times)
         lum_window = np.array(self.lum_window_counts, dtype=np.float32)
@@ -602,7 +604,8 @@ class PEATMainWindow(QMainWindow):
         lum_act = np.array(self.lum_act_counts, dtype=np.float32)
         red_act = np.array(self.red_act_counts, dtype=np.float32)
         self._draw_band_curves(t_arr, lum_act, red_act, lum_raw, red_raw,
-                               np.array(self.lum_risk, dtype=np.float32))
+                               np.array(self.lum_risk, dtype=np.float32),
+                               np.array(self.red_risk, dtype=np.float32))
 
         # 실시간 상태
         self.lbl_status.setText(
@@ -620,7 +623,6 @@ class PEATMainWindow(QMainWindow):
             lum_window = np.array(summary["lum_window"], dtype=np.float32)
             red_window = np.array(summary["red_window"], dtype=np.float32)
             # 실시간 누적값을 최종값으로 교체 — FAIL 구간 링크·PDF가 판정과 같은 값을 쓰도록
-            # (적색은 실시간에 페이싱 소급 카운트가 덜 반영됨)
             self.times = list(summary["times"])
             self.lum_window_counts = lum_window.tolist()
             self.red_window_counts = red_window.tolist()
@@ -629,9 +631,10 @@ class PEATMainWindow(QMainWindow):
             lum_act = np.array(summary.get("lum_window_act", summary["lum_window"]), dtype=np.float32)
             red_act = np.array(summary.get("red_window_act", summary["red_window"]), dtype=np.float32)
             ext = np.array(summary["extended_series"], dtype=np.float32)
-            lum_risk = summary.get("lum_risk")
+            lum_risk, red_risk = summary.get("lum_risk"), summary.get("red_risk")
             band_top = self._draw_band_curves(t, lum_act, red_act, lum_raw, red_raw,
-                                              None if lum_risk is None else np.asarray(lum_risk))
+                                              None if lum_risk is None else np.asarray(lum_risk),
+                                              None if red_risk is None else np.asarray(red_risk))
 
             # Extended Flash (파란선) — ≥0.8일 때만 표시
             self.curve_extended.setData(t, np.where(ext >= 0.8, ext * band_top, 0.0))
@@ -911,15 +914,10 @@ class PEATMainWindow(QMainWindow):
 
     @staticmethod
     def _violation_masks(frame, prev_frame):
-        """직전 프레임 대비 위반 픽셀 마스크 (휘도 유해 변화, 적색 전환).
-        분석 루프는 극값 대비지만, 시각화는 프레임간 변화로도 위반 위치를 충분히 보여준다."""
-        lin_now = linearize_video(bgr_to_rgb01(frame))
-        lin_prev = linearize_video(bgr_to_rgb01(prev_frame))
+        """직전 프레임 대비 위반 픽셀 마스크 (휘도·적색 플래시, PEAT 기준).
+        분석은 극값 대비지만, 시각화는 프레임간 변화로도 위반 위치를 충분히 보여준다."""
         lum_mask = peat_flash_mask(frame, prev_frame)
-        sat_now = saturated_red_ratio(lin_now) >= RED_RATIO_THRESH
-        sat_prev = saturated_red_ratio(lin_prev) >= RED_RATIO_THRESH
-        red_dv = red_flash_value(lin_now) - red_flash_value(lin_prev)
-        red_mask = (sat_now | sat_prev) & (np.abs(red_dv) > RED_DELTA_THRESH)
+        red_mask = peat_red_mask(frame, prev_frame)
         return lum_mask, red_mask
 
     def _show_frame_at_time(self, time_sec):

@@ -37,9 +37,6 @@ AREA_THRESHOLD = 0.25     # 플래시 면적: 전체 화면의 25% (ITU/Ofcom �
 RED_RATIO_THRESH = 0.80   # 포화 적색: R/(R+G+B) ≥ 0.8
 RED_DELTA_THRESH = 20.0   # 적색 전환: (R−G−B)×320 변화 > 20 (WCAG 작업정의)
 WINDOW_SECONDS = 1.0      # 슬라이딩 윈도우 (판정용)
-ACT_WINDOW_SECONDS = 0.75  # 활동선(점선) 표시 전용 짧은 윈도우 — 초당 환산해 그림.
-                           # 공식 PEAT 점선처럼 상승·하강이 날카로움. 1.0은 꼬리가
-                           # 늘어지고 0.5는 스파이크가 좁아짐 — wuwa/ex.png 대조로 0.75 선정
 FAIL_TRANSITIONS = 7      # 1초 내 방향전환 ≥7회 (= >3 flash = >6 transition)
 PACE_SAFE_60HZ = 0.334    # leading edge 간격 ≥334ms면 안전 (60Hz 환경)
 PACE_SAFE_50HZ = 0.360    # ≥360ms면 안전 (50Hz 환경)
@@ -80,6 +77,13 @@ PEAT_DARK_Y = 0.8         # 어두운 쪽이 이 이상이면 플래시 아님
 PEAT_MOTION_R = 5         # 움직임 허용 십자 이웃 반경(PEAT_WIDTH 기준 px)
 PEAT_RECENT_S = 7 / 30.0  # FAIL 유지에 필요한 최근 플래시 시간창
 PEAT_RECENT_AREA = 0.10   # 최근 플래시 픽셀의 10° 박스 면적 하한
+# 적색(합성 테스트 8차): WCAG 적색값 (R−G−B)×320을 sRGB 선형값으로 계산(감마 2.4는 r75·80 FAIL을 놓침).
+#   플래시 기준 20(r70=19.6 안 셈, r75=22.5 셈), 전환 수 기준은 더 낮음(r60=14.5도 셈),
+#   포화 적색 R/(R+G+B)는 0.8보다 엄격(255,80,80=0.86 셈 / 255,95,95=0.81 안 셈 → 중간 0.84).
+#   위험 세기 = 1.8×적색값 변화+229 (혼합색 포함 오차 1% 안), 면적 25% 초과·FAIL 종료는 휘도와 같음.
+PEAT_RED_FLASH = 20.0
+PEAT_RED_COUNT = 10.0
+PEAT_RED_SAT = 0.84
 RISK_FAIL = 0.5           # PEAT 위험도 합격선
 RISK_MAX = 3.4            # PEAT 위험도 천장
 
@@ -88,13 +92,18 @@ _SRGB_LUT = np.where(_SRGB_LUT <= 0.04045, _SRGB_LUT / 12.92,
                      np.power((_SRGB_LUT + 0.055) / 1.055, 2.4)).astype(np.float32)
 
 
-def peat_luma(frame_bgr, resize=True):
-    """BGR 프레임 → PEAT 기준 폭(resize=False면 원본 크기)의 sRGB 상대휘도 Y(0~1)."""
+def peat_rgb(frame_bgr, resize=True):
+    """BGR 프레임 → PEAT 기준 폭(resize=False면 원본 크기)의 sRGB 선형 BGR(0~1)."""
     H, W = frame_bgr.shape[:2]
     if resize and W != PEAT_WIDTH:
         frame_bgr = cv2.resize(frame_bgr, (PEAT_WIDTH, max(3, int(round(H * PEAT_WIDTH / W)))),
                                interpolation=cv2.INTER_AREA)
-    lin = _SRGB_LUT[frame_bgr]
+    return _SRGB_LUT[frame_bgr]
+
+
+def peat_luma(frame_bgr, resize=True):
+    """BGR 프레임 → sRGB 상대휘도 Y(0~1)."""
+    lin = peat_rgb(frame_bgr, resize)
     return 0.0722 * lin[..., 0] + 0.7152 * lin[..., 1] + 0.2126 * lin[..., 2]
 
 
@@ -102,6 +111,17 @@ def peat_flash_mask(frame_bgr, prev_bgr):
     """두 프레임 사이 PEAT 플래시 기준(ΔY≥0.095, 어두운 쪽 <0.8)을 넘는 픽셀 — 미리보기 강조용."""
     a, b = peat_luma(frame_bgr, resize=False), peat_luma(prev_bgr, resize=False)
     return (np.abs(a - b) >= PEAT_FLASH_DY) & (np.minimum(a, b) < PEAT_DARK_Y)
+
+
+def peat_red_mask(frame_bgr, prev_bgr):
+    """두 프레임 사이 PEAT 적색 플래시 기준(포화 적색 + 적색값 변화 ≥20)을 넘는 픽셀 — 미리보기 강조용."""
+    out = []
+    for f in (frame_bgr, prev_bgr):
+        lin = peat_rgb(f, resize=False)
+        B, G, R = lin[..., 0], lin[..., 1], lin[..., 2]
+        out.append((np.maximum(R - G - B, 0.0) * 320.0, R >= PEAT_RED_SAT * (R + G + B + 1e-6)))
+    (va, sa), (vb, sb) = out
+    return (np.abs(va - vb) >= PEAT_RED_FLASH) & (sa | sb)
 
 
 def _box_area_map(mask):
@@ -119,25 +139,30 @@ def _risk_from_area(area):
 
 
 class _PixelExtremes:
-    """픽셀별 극값·방향 추적과 최근 1초 전환 이력."""
+    """픽셀별 극값·방향 추적과 최근 1초 전환 이력.
+    sat를 주면(적색) 지금 또는 극값 상태가 포화 적색인 픽셀만 전환으로 센다."""
 
     def __init__(self, shape, thr, window_frames, dark=None):
         self.thr, self.dark, self.wf = thr, dark, window_frames
         self.ext = None
+        self.sat_ext = None
         self.dr = np.zeros(shape, np.int8)
         self.hist = np.zeros((window_frames,) + shape, bool)
         self.age = np.full(shape, 9999, np.int32)   # 마지막 전환 후 지난 프레임 수
         self.i = 0
 
-    def step(self, Y, explained):
+    def step(self, Y, explained, sat=None):
         if self.ext is None:
             self.ext = Y.copy()
+            self.sat_ext = sat
             return
         d = Y - self.ext
         sg = np.sign(d).astype(np.int8)
         big = np.abs(d) >= self.thr
         if self.dark is not None:
             big &= np.minimum(Y, self.ext) < self.dark
+        if sat is not None:
+            big &= sat | self.sat_ext
         tr = big & (sg != 0) & (sg != self.dr) & ~explained
         self.ext = np.where(explained, Y, self.ext)          # 이동으로 설명된 변화는 흡수
         self.ext = np.where(tr, Y, self.ext)
@@ -145,6 +170,8 @@ class _PixelExtremes:
         grow = (~tr) & (((self.dr > 0) & (Y > self.ext)) | ((self.dr < 0) & (Y < self.ext)))
         self.ext = np.where(grow, Y, self.ext)
         self.ext = np.where((self.dr == 0) & ~big, Y, self.ext)
+        if sat is not None:                                  # 극값이 바뀐 픽셀은 포화 상태도 갱신
+            self.sat_ext = np.where(self.ext == Y, sat, self.sat_ext)
         self.age = np.where(tr, 0, np.minimum(self.age + 1, 9999))
         self.hist[self.i % self.wf] = tr
         self.i += 1
@@ -153,31 +180,20 @@ class _PixelExtremes:
         return self.hist.sum(axis=0)
 
 
-class PeatLumEngine:
-    """프레임마다 update() → dict(count, fail, risk, area)."""
+class _PeatChannel:
+    """한 채널(휘도 Y 또는 적색값)의 전환 수·FAIL·위험도. 전환 수용/플래시용 추적기 2개."""
 
-    def __init__(self, window_frames, fps):
-        self.wf = window_frames
-        self.recent = max(1, int(round(PEAT_RECENT_S * fps)))
-        r = PEAT_MOTION_R
-        self.kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (2 * r + 1, 2 * r + 1))
-        self.prev = None
+    def __init__(self, window_frames, recent, count_thr, flash_thr, dark=None):
+        self.wf, self.recent = window_frames, recent
+        self.count_thr, self.flash_thr, self.dark = count_thr, flash_thr, dark
         self.tc = self.tf = None
 
-    def _explained(self, Y):
-        k, p = self.kernel, self.prev
-        return ((Y >= cv2.erode(p, k)) & (Y <= cv2.dilate(p, k))
-                & (p >= cv2.erode(Y, k)) & (p <= cv2.dilate(Y, k)))
-
-    def update(self, frame_bgr):
-        Y = peat_luma(frame_bgr)
+    def update(self, V, explained, sat=None):
         if self.tc is None:
-            self.tc = _PixelExtremes(Y.shape, PEAT_COUNT_DY, self.wf)
-            self.tf = _PixelExtremes(Y.shape, PEAT_FLASH_DY, self.wf, PEAT_DARK_Y)
-        ex = np.zeros(Y.shape, bool) if self.prev is None else self._explained(Y)
-        self.tc.step(Y, ex)
-        self.tf.step(Y, ex)
-        self.prev = Y
+            self.tc = _PixelExtremes(V.shape, self.count_thr, self.wf)
+            self.tf = _PixelExtremes(V.shape, self.flash_thr, self.wf, self.dark)
+        self.tc.step(V, explained, sat)
+        self.tf.step(V, explained, sat)
         C = self.tc.counts()
         count = 0
         for k in range(1, int(C.max()) + 1):
@@ -185,7 +201,7 @@ class PeatLumEngine:
                 count = k
             else:
                 break
-        recent = self.tf.age < self.recent
+        recent = self.tf.age <= self.recent
         recent_area = float(_box_area_map(recent).max()) if recent.any() else 0.0
         fail = count >= FAIL_TRANSITIONS and recent_area > PEAT_RECENT_AREA
         risk = 0.0
@@ -195,6 +211,36 @@ class PeatLumEngine:
             if not fail:
                 risk = min(risk, 0.4 if count >= FAIL_TRANSITIONS - 1 else 0.3)
         return {"count": count, "fail": fail, "risk": risk, "area": recent_area}
+
+
+class PeatEngine:
+    """프레임마다 update() → (휘도 dict, 적색 dict), 각 dict(count, fail, risk, area)."""
+
+    def __init__(self, window_frames, fps):
+        recent = max(1, int(round(PEAT_RECENT_S * fps)))
+        r = PEAT_MOTION_R
+        self.kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (2 * r + 1, 2 * r + 1))
+        self.lum = _PeatChannel(window_frames, recent, PEAT_COUNT_DY, PEAT_FLASH_DY, PEAT_DARK_Y)
+        self.red = _PeatChannel(window_frames, recent, PEAT_RED_COUNT, PEAT_RED_FLASH)
+        self.prev_Y = self.prev_R = None
+        self.sat = None
+
+    def _explained(self, V, P):
+        k = self.kernel
+        return ((V >= cv2.erode(P, k)) & (V <= cv2.dilate(P, k))
+                & (P >= cv2.erode(V, k)) & (P <= cv2.dilate(V, k)))
+
+    def update(self, frame_bgr):
+        lin = peat_rgb(frame_bgr)
+        B, G, R = lin[..., 0], lin[..., 1], lin[..., 2]
+        Y = 0.0722 * B + 0.7152 * G + 0.2126 * R
+        Rv = np.maximum(R - G - B, 0.0) * 320.0                # WCAG 적색값 (R−G−B)×320
+        self.sat = R >= PEAT_RED_SAT * (R + G + B + 1e-6)      # 포화 적색
+        first = self.prev_Y is None
+        ex_y = np.zeros(Y.shape, bool) if first else self._explained(Y, self.prev_Y)
+        ex_r = np.zeros(Y.shape, bool) if first else self._explained(Rv, self.prev_R)
+        self.prev_Y, self.prev_R = Y, Rv
+        return self.lum.update(Y, ex_y), self.red.update(Rv, ex_r, self.sat)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -250,40 +296,6 @@ def local_area_fraction(mask):
     # 모서리 플래시를 거울상으로 복제해 밀도를 과대평가하는 것을 방지.
     y0, x0 = kh // 2, kw // 2
     return float(local[y0:y0 + H - kh + 1, x0:x0 + W - kw + 1].max())
-
-
-def block_sign_map(L_cd, ext_arr, harmful, grid=(24, 32)):
-    """극값 대비 유해 변화의 방향(+1/-1) 블록 지도. WCAG의 '동일 영역'
-    opposing 판정용 — 이전 지도와 부호 상관이 음수면 같은 영역이 반전한 것."""
-    signed = np.zeros(L_cd.shape, np.float32)
-    signed[harmful] = np.sign((L_cd - ext_arr)[harmful])
-    return cv2.resize(signed, (grid[1], grid[0]), interpolation=cv2.INTER_AREA)
-
-
-def signs_reversed(s_now, s_prev):
-    """두 부호 지도가 '같은 블록에서 반대 방향'이면 True (동일 영역 반전 = 점멸).
-    모션/줌은 각 영역의 부호가 유지되어 상관이 양수 → False.
-
-    겹치는 블록이 없으면(플래시 영역이 프레임 사이에 이동/점프한 경우) 각 지도의
-    지배 부호로 판정: 점멸은 각 지도가 한 방향으로 치우치고 서로 반대다
-    (예: A영역 소등 → B영역 점등, 교차 스트로브). 모션은 상승(전연)/하강(후연)
-    블록이 한 지도 안에 섞여 지배 부호가 약하므로 여전히 False."""
-    if s_prev is None:
-        return False
-    act_now = np.abs(s_now) > 0.05
-    act_prev = np.abs(s_prev) > 0.05
-    overlap = act_now & act_prev
-    if overlap.any():
-        # 임계 −0.02: 모션은 겹침 상관이 양수(전연/후연 부호 유지), 점멸은 음수 —
-        # 부호만으로 갈린다. −0.2처럼 깊은 반상관을 요구하면 장면 전체가 바뀌며
-        # 점멸하는 컷 점멸(게임/트레일러)의 희석된 상관(−0.2~−0.02)을 놓친다
-        # (PEAT_wuwa 실측: 진짜 점멸 corr −0.03~−0.85, 모션 +0.02~+0.48).
-        return float((s_now * s_prev)[overlap].mean()) < -0.02
-    if not act_now.any() or not act_prev.any():
-        return False
-    m_now = float(s_now[act_now].mean())
-    m_prev = float(s_prev[act_prev].mean())
-    return m_now * m_prev < -0.36  # 양쪽 지배 부호 |m|≈0.6 이상 & 서로 반대
 
 
 def harmful_luminance_mask(L_a, L_b):
@@ -375,8 +387,6 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
     effective_fps = fps / max(1, downsample)
     pace_safe = PACE_SAFE_50HZ if fps <= 55 else PACE_SAFE_60HZ
     window_frames = max(1, int(round(window_seconds * effective_fps)))
-    act_frames = max(1, int(round(ACT_WINDOW_SECONDS * effective_fps)))
-    act_scale = window_seconds / ACT_WINDOW_SECONDS  # 짧은 윈도우 카운트 → 초당 환산(적색 점선)
 
     # 진행률 표시용 총 처리 프레임 수 (추정)
     total_proc = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) // max(1, downsample)
@@ -385,27 +395,13 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
 
     # 누적 시계열
     times = []
-    red_area_series = []       # 극값 대비 적색 플래시 면적
-    red_event_flags = []       # 적색 방향전환 발생 프레임 — 판정용
-    red_raw_flags = []         # 원시 반전 후보 — 적색 diag(실선) 표시용
     pattern_flags = []         # 유해 줄무늬 패턴 프레임
     sat_area_series = []       # 포화 적색 존재 면적(전환 무관 — 적색 활동선용)
 
-    # 휘도: PEAT식 픽셀 엔진
-    lum_engine = PeatLumEngine(window_frames, effective_fps)
-    lum_count = []             # 프레임별 전환 수(진단 실선)
-    lum_fail_flags = []        # 프레임별 휘도 FAIL
-    lum_risk = []              # 프레임별 위험도(PEAT 0~3.4)
-    lum_area_series = []       # 최근 플래시 픽셀의 10° 박스 면적
-
-    # 적색 극값 추적 상태
-    red_dir = 0
-    last_ext_redval = None    # 극값 상태의 (R−G−B)×320 지도
-    last_ext_satmask = None
-    last_ext_red_sign = None  # 직전 적색 극값을 만든 변화의 방향 블록 지도
-    last_red_event_t = None
-    red_pending_idx = None    # 페이싱 잠정 면제 이벤트의 flags 인덱스 (소급 카운트용)
-    last_red_sig_t = None     # 마지막 유의 적색 변화 시각 — 버스트 시작 판정용
+    # 휘도·적색: PEAT식 픽셀 엔진
+    engine = PeatEngine(window_frames, effective_fps)
+    lum_count, lum_fail_flags, lum_risk, lum_area_series = [], [], [], []
+    red_count, red_fail_flags, red_risk, red_area_series = [], [], [], []
 
     prev_L_cd = None
 
@@ -425,179 +421,64 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         if max_frames > 0 and processed >= max_frames:
             break
 
-        rgb_lin = linearize_video(bgr_to_rgb01(frame))
-        L_cd = luminance_cd(rgb_lin)
-        sat_ratio = saturated_red_ratio(rgb_lin)
-        satmask = sat_ratio >= RED_RATIO_THRESH
-        red_val = red_flash_value(rgb_lin)
+        L_cd = luminance_cd(linearize_video(bgr_to_rgb01(frame)))   # 줄무늬 패턴용
         t = processed / effective_fps
 
-        lum = lum_engine.update(frame)
-        lum_count.append(lum["count"])
-        lum_fail_flags.append(lum["fail"])
-        lum_risk.append(lum["risk"])
-        lum_area_series.append(lum["area"])
-
-        # ── 첫 프레임 초기화 ──
-        if last_ext_redval is None:
-            times.append(t)
-            red_area_series.append(0.0)
-            sat_area_series.append(local_area_fraction(satmask))
-            red_event_flags.append(False)
-            red_raw_flags.append(False)
-            pattern_flags.append(False)
-            last_ext_redval = red_val.copy()
-            last_ext_satmask = satmask.copy()
-            prev_L_cd = L_cd
-            processed += 1
-            if on_frame is not None:
-                on_frame({
-                    "time": t, "processed": processed, "total": total_proc,
-                    "lum_area": lum["area"], "red_area": 0.0,
-                    "sat_area": sat_area_series[-1],
-                    "lum_window_count": 0, "red_window_count": 0,
-                    "lum_window_raw_count": 0, "red_window_raw_count": 0,
-                    "lum_act_count": 0.0, "red_act_count": 0.0,
-                    "lum_risk": 0.0,
-                    "pattern_hit": False, "red_opposing": False,
-                })
-            continue
-
-        # ── 적색 플래시: WCAG 작업정의 ──
-        # 한쪽 상태가 포화적색(R/(R+G+B)≥0.8)이고 (R−G−B)×320 변화 >20인 픽셀을
-        # '적색으로 진입(+)/이탈(−)' 방향별 로컬 면적으로 판정 (휘도와 동일 구조).
-        red_dv = red_val - last_ext_redval
-        red_trans_mask = (satmask | last_ext_satmask) & (np.abs(red_dv) > RED_DELTA_THRESH)
-        red_up_area = local_area_fraction(red_trans_mask & (red_dv > 0))
-        red_down_area = local_area_fraction(red_trans_mask & (red_dv < 0))
-        red_area = local_area_fraction(red_trans_mask)  # 결합 면적 (휘도와 동일)
-        red_sign_now = block_sign_map(red_val, last_ext_redval, red_trans_mask)
-        if (red_up_area >= area_threshold * 0.5 and red_down_area >= area_threshold * 0.5
-                and red_area >= area_threshold):
-            # 양방향 동시 유의: 같은 영역이 실제 반전했을 때만 opposing (휘도와 동일)
-            if signs_reversed(red_sign_now, last_ext_red_sign):
-                red_cur_dir = -red_dir if red_dir != 0 else 1
-            else:
-                red_cur_dir = 1 if red_up_area >= red_down_area else -1
-        elif red_up_area > 0.0 or red_down_area > 0.0:
-            red_cur_dir = 1 if red_up_area >= red_down_area else -1
-        else:
-            red_cur_dir = 0
-        red_significant = red_area >= area_threshold
-
-        red_opposing_raw = (
-            red_significant and red_dir != 0
-            and red_cur_dir != 0 and red_cur_dir != red_dir
-        )
-        # 휘도와 동일: 같은 영역이 실제 반전했을 때만 전환 인정 (모션 제외)
-        # + 버스트 시작 보정(오프바이원): 1초 이상 조용하다 나타난 첫 유의 전환도 카운트
-        red_burst_start = (
-            red_significant and red_cur_dir != 0
-            and (last_red_sig_t is None or (t - last_red_sig_t) > window_seconds)
-        )
-        red_opposing = (red_opposing_raw and signs_reversed(red_sign_now, last_ext_red_sign)) \
-            or red_burst_start
-        if red_significant:
-            last_red_sig_t = t
-        red_counted = red_opposing
-        # 페이싱 면제: 휘도와 동일 — 고립 이벤트만 잠정 면제 + 소급 카운트
-        if red_counted:
-            gap = None if last_red_event_t is None else (t - last_red_event_t)
-            if gap is None or gap >= pace_safe:
-                red_counted = False
-                red_pending_idx = len(red_event_flags)
-            else:
-                if red_pending_idx is not None:
-                    red_event_flags[red_pending_idx] = True
-                red_pending_idx = None
-
-        if red_opposing:
-            last_ext_redval, last_ext_satmask = red_val.copy(), satmask.copy()
-            if np.abs(red_sign_now).max() > 0.05:
-                last_ext_red_sign = red_sign_now
-            red_dir = red_cur_dir
-            last_red_event_t = t
-        elif red_opposing_raw:
-            # 동일 영역 반전 아님(모션) → 카운트 없이 방향/극값만 전환
-            last_ext_redval, last_ext_satmask = red_val.copy(), satmask.copy()
-            if np.abs(red_sign_now).max() > 0.05:
-                last_ext_red_sign = red_sign_now
-            red_dir = red_cur_dir
-        elif red_cur_dir != 0 and (red_dir == 0 or red_cur_dir == red_dir):
-            last_ext_redval, last_ext_satmask = red_val.copy(), satmask.copy()
-            if np.abs(red_sign_now).max() > 0.05:
-                last_ext_red_sign = red_sign_now
-            if red_dir == 0:
-                red_dir = red_cur_dir
+        lum, red = engine.update(frame)
+        for (cnt, fl, rk, ar), d in (((lum_count, lum_fail_flags, lum_risk, lum_area_series), lum),
+                                     ((red_count, red_fail_flags, red_risk, red_area_series), red)):
+            cnt.append(d["count"]); fl.append(d["fail"]); rk.append(d["risk"]); ar.append(d["area"])
+        sat_area_series.append(float(_box_area_map(engine.sat).max()))
 
         # ── 공간 패턴(줄무늬) ──
         pattern_hit = False
         if enable_pattern:
-            moving = float(np.abs(L_cd - prev_L_cd).mean()) >= FLASH_DELTA_CD * 0.1
+            moving = prev_L_cd is not None and float(np.abs(L_cd - prev_L_cd).mean()) >= FLASH_DELTA_CD * 0.1
             pattern_hit, _ = detect_stripe_pattern(L_cd, moving)
 
         times.append(t)
-        red_area_series.append(red_area)
-        sat_area_series.append(local_area_fraction(satmask))
-        red_event_flags.append(red_counted)
-        red_raw_flags.append(bool(red_opposing_raw or red_burst_start))
         pattern_flags.append(pattern_hit)
-
         prev_L_cd = L_cd
         processed += 1
 
         if on_frame is not None:
             # 판정 카운트: 전환 수 ≥7이라도 최근 플래시가 없으면(FAIL 아님) 6으로 표시
-            _lw_cnt = lum["count"] if (lum["fail"] or lum["count"] < FAIL_TRANSITIONS) \
-                else FAIL_TRANSITIONS - 1
-            _rw_cnt = int(np.count_nonzero(red_event_flags[-window_frames:]))
-            _ra_cnt = float(np.count_nonzero(red_event_flags[-act_frames:]) * act_scale)
-            if _rw_cnt < FAIL_TRANSITIONS:
-                _ra_cnt = min(_ra_cnt, float(_rw_cnt))
+            def judged(d):
+                return d["count"] if (d["fail"] or d["count"] < FAIL_TRANSITIONS) else FAIL_TRANSITIONS - 1
             on_frame({
                 "time": t, "processed": processed, "total": total_proc,
-                "lum_area": lum["area"], "red_area": red_area,
+                "lum_area": lum["area"], "red_area": red["area"],
                 "sat_area": sat_area_series[-1],
-                "lum_window_count": _lw_cnt,
-                "red_window_count": _rw_cnt,
+                "lum_window_count": judged(lum),
+                "red_window_count": judged(red),
                 "lum_window_raw_count": lum["count"],
-                "red_window_raw_count": int(np.count_nonzero(red_raw_flags[-window_frames:])),
-                "lum_act_count": float(_lw_cnt),
-                "red_act_count": _ra_cnt,
+                "red_window_raw_count": red["count"],
+                "lum_act_count": float(judged(lum)),
+                "red_act_count": float(judged(red)),
                 "lum_risk": lum["risk"],
+                "red_risk": red["risk"],
                 "pattern_hit": pattern_hit,
-                "red_opposing": red_counted,
             })
 
     cap.release()
 
-    # ── 1초 슬라이딩 윈도우 방향전환 카운트 (적색) / 휘도는 픽셀 엔진 결과 ──
-    red_flags = np.array(red_event_flags, dtype=bool)
+    # ── 휘도·적색: 픽셀 엔진 결과 ──
     pattern_arr = np.array(pattern_flags, dtype=bool)
 
-    def windowed_count(flags, wf=window_frames):
-        """각 인덱스에서 직전 wf개(현재 포함) True 개수."""
-        c = np.concatenate([[0], np.cumsum(flags.astype(np.int32))])
-        idx = np.arange(len(flags))
-        lo = np.maximum(0, idx - wf + 1)
-        return (c[idx + 1] - c[lo]).astype(np.int32)
+    def judged(count, fail):
+        """판정 카운트: FAIL 프레임만 7 이상 — 전환 수가 남아도 최근 플래시가 없으면 6으로 클램프."""
+        c = np.array(count, dtype=np.int32)
+        return np.where(np.array(fail, dtype=bool) | (c < FAIL_TRANSITIONS), c,
+                        FAIL_TRANSITIONS - 1).astype(np.int32)
 
     lum_window_raw = np.array(lum_count, dtype=np.int32)      # 진단 실선 = PEAT 휘도 횟수
-    lum_fail_arr = np.array(lum_fail_flags, dtype=bool)
-    # 판정 카운트: FAIL 프레임만 7 이상 — 전환 수가 남아도 최근 플래시가 없으면 6으로 클램프
-    lum_window = np.where(lum_fail_arr | (lum_window_raw < FAIL_TRANSITIONS), lum_window_raw,
-                          FAIL_TRANSITIONS - 1).astype(np.int32)
+    red_window_raw = np.array(red_count, dtype=np.int32)      # 진단 실선 = PEAT 적색 횟수
+    lum_window = judged(lum_count, lum_fail_flags)
+    red_window = judged(red_count, red_fail_flags)
     lum_risk_arr = np.array(lum_risk, dtype=np.float32)
-    red_window = windowed_count(red_flags)
-    red_window_raw = windowed_count(np.array(red_raw_flags, dtype=bool))
-    lum_window_act = lum_window.astype(np.float32)   # 휘도 점선은 lum_risk로 그림 — 호환용
-    red_window_act = windowed_count(red_flags, act_frames).astype(np.float32) * act_scale
-    # 적색 활동선(점선)은 판정이 FAIL 미만인 구간에서만 판정 카운트로 상한 캡 —
-    # 0.75초 창의 초당 환산값이 판정(1초 창)보다 커져 점선만 FAIL 경계를 넘는
-    # 차트-판정 불일치 방지. 판정 FAIL(≥7) 구간은 캡 없이 그대로.
-    red_window_act = np.where(red_window < FAIL_TRANSITIONS,
-                              np.minimum(red_window_act, red_window.astype(np.float32)),
-                              red_window_act)
+    red_risk_arr = np.array(red_risk, dtype=np.float32)
+    lum_window_act = lum_window.astype(np.float32)   # 점선은 위험도로 그림 — 호환용
+    red_window_act = red_window.astype(np.float32)
 
     lum_fail = bool((lum_window >= FAIL_TRANSITIONS).any())
     red_fail = bool((red_window >= FAIL_TRANSITIONS).any())
@@ -657,6 +538,7 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         "times": np.array(times),
         "lum_area": np.array(lum_area_series, dtype=np.float32),
         "lum_risk": lum_risk_arr,
+        "red_risk": red_risk_arr,
         "red_area": np.array(red_area_series),
         "sat_area": np.array(sat_area_series),
         "lum_window": lum_window,
@@ -779,7 +661,7 @@ def plot_unified(metrics):
     # 공식 PEAT diag처럼 낮은 활동까지 길게 이어지고 정점이 CAUTION(FAIL) 부근에 머묾.
     lum_act = count_to_activity_y(metrics["lum_window"], band_top, ymax,
                                   metrics.get("lum_risk"))
-    red_act = count_to_activity_y(metrics["red_window_act"], band_top, ymax)
+    red_act = count_to_activity_y(metrics["red_window"], band_top, ymax, metrics.get("red_risk"))
     lum_cnt = count_to_band_y(metrics["lum_window_raw"] / 2.0, band_top)
     red_cnt = count_to_band_y(metrics["red_window_raw"] / 2.0, band_top)
 
