@@ -25,21 +25,9 @@ import matplotlib.pyplot as plt
 # ──────────────────────────────────────────────────────────────────────────
 # 표준 상수 (ITU-R BT.1702-3 / WCAG 2.3.1 / Harding)
 # ──────────────────────────────────────────────────────────────────────────
-DISPLAY_PEAK_CD = 200.0   # SDR 기준 백색 휘도 가정 (ITU). 상대휘도 1.0 = 200 cd/m²
-DISPLAY_GAMMA = 2.4       # BT.1886 디스플레이 감마 (ITU-R BT.1702-3 Table 1)
-FLASH_DELTA_CD = 20.0     # 유해 휘도 변화 임계 (어두운 상태 < 160 cd/m²일 때)
-DARK_BOUND_CD = 160.0     # 이 이상 밝으면 Michelson 대비 기준으로 전환
-# ※ 상수 커플링: 20/200=10%(변화), 160/200=0.8(어두운쪽 경계)이 WCAG의 상대휘도
-#   기준과 정확히 대응한다. DISPLAY_PEAK_CD를 바꾸면 FLASH_DELTA_CD와
-#   DARK_BOUND_CD도 같은 비율로 함께 조정해야 WCAG 등가가 유지된다.
-MICHELSON_THRESH = 1.0 / 17.0  # 어두운 상태 ≥160 cd/m²일 때 유해 대비 (≈0.0588)
-AREA_THRESHOLD = 0.25     # 플래시 면적: 전체 화면의 25% (ITU/Ofcom 기준)
-RED_RATIO_THRESH = 0.80   # 포화 적색: R/(R+G+B) ≥ 0.8
-RED_DELTA_THRESH = 20.0   # 적색 전환: (R−G−B)×320 변화 > 20 (WCAG 작업정의)
-WINDOW_SECONDS = 1.0      # 슬라이딩 윈도우 (판정용)
-FAIL_TRANSITIONS = 7      # 1초 내 방향전환 ≥7회 (= >3 flash = >6 transition)
-PACE_SAFE_60HZ = 0.334    # leading edge 간격 ≥334ms면 안전 (60Hz 환경)
-PACE_SAFE_50HZ = 0.360    # ≥360ms면 안전 (50Hz 환경)
+AREA_THRESHOLD = 0.25     # 플래시 면적: 10° 박스(화면 1/3×1/3)의 25% '초과'
+WINDOW_SECONDS = 1.0      # 전환 수를 세는 창
+FAIL_TRANSITIONS = 7      # 1초 내 전환 ≥7회 (= >3 flash)
 
 EXTENDED_SECONDS = 5.0    # 5초 지속 플래시 경고
 
@@ -49,6 +37,9 @@ PATTERN_LIGHT_CD = 50.0       # 가장 밝은 줄무늬 > 50 cd/m²
 PATTERN_AREA_STATIC = 0.40    # 정지 패턴: 화면 >40%
 PATTERN_AREA_MOVING = 0.25    # 움직임/점멸/반전 패턴: 화면 >25%
 PATTERN_MIN_SECONDS = 0.5     # ≥0.5초 지속
+DISPLAY_PEAK_CD = 200.0       # 패턴 cd/m² 환산: SDR 백색 200 cd/m² 가정 (ITU)
+DISPLAY_GAMMA = 2.4           # 패턴 cd/m² 환산: BT.1886 디스플레이 감마 (ITU-R BT.1702-3 Table 1)
+FLASH_DELTA_CD = 20.0         # 패턴 광-암 차 하한 (cd/m²)
 
 # ──────────────────────────────────────────────────────────────────────────
 # 휘도 플래시: PEAT식 픽셀 엔진
@@ -183,8 +174,8 @@ class _PixelExtremes:
 class _PeatChannel:
     """한 채널(휘도 Y 또는 적색값)의 전환 수·FAIL·위험도. 전환 수용/플래시용 추적기 2개."""
 
-    def __init__(self, window_frames, recent, count_thr, flash_thr, dark=None):
-        self.wf, self.recent = window_frames, recent
+    def __init__(self, window_frames, recent, count_thr, flash_thr, dark=None, area_thr=AREA_THRESHOLD):
+        self.wf, self.recent, self.area_thr = window_frames, recent, area_thr
         self.count_thr, self.flash_thr, self.dark = count_thr, flash_thr, dark
         self.tc = self.tf = None
 
@@ -197,7 +188,7 @@ class _PeatChannel:
         C = self.tc.counts()
         count = 0
         for k in range(1, int(C.max()) + 1):
-            if _box_area_map(C >= k).max() > AREA_THRESHOLD + 1e-6:
+            if _box_area_map(C >= k).max() > self.area_thr + 1e-6:
                 count = k
             else:
                 break
@@ -216,12 +207,12 @@ class _PeatChannel:
 class PeatEngine:
     """프레임마다 update() → (휘도 dict, 적색 dict), 각 dict(count, fail, risk, area)."""
 
-    def __init__(self, window_frames, fps):
+    def __init__(self, window_frames, fps, area_thr=AREA_THRESHOLD):
         recent = max(1, int(round(PEAT_RECENT_S * fps)))
         r = PEAT_MOTION_R
         self.kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (2 * r + 1, 2 * r + 1))
-        self.lum = _PeatChannel(window_frames, recent, PEAT_COUNT_DY, PEAT_FLASH_DY, PEAT_DARK_Y)
-        self.red = _PeatChannel(window_frames, recent, PEAT_RED_COUNT, PEAT_RED_FLASH)
+        self.lum = _PeatChannel(window_frames, recent, PEAT_COUNT_DY, PEAT_FLASH_DY, PEAT_DARK_Y, area_thr)
+        self.red = _PeatChannel(window_frames, recent, PEAT_RED_COUNT, PEAT_RED_FLASH, area_thr=area_thr)
         self.prev_Y = self.prev_R = None
         self.sat = None
 
@@ -251,10 +242,8 @@ def bgr_to_rgb01(img_bgr):
 
 
 def linearize_video(c):
-    """영상 신호 → 선형 광량. ITU-R BT.1702-3 Table 1(휘도 환산표)은 SDR을 BT.1886
-    디스플레이 감마 2.4로 환산한다(예: 신호 0.52 → 41.7 cd/m²). 웹용 sRGB(선형 토 +
-    ≈2.2)는 암부를 밝게 환산해 어두운 장면의 밝기 차이를 과장한다 — QA 1차에서
-    sRGB는 Super Speed 5.7초를 과민하게 잡았고 감마 2.4는 12개 영상 판정이 PEAT와 일치."""
+    """영상 신호 → 선형 광량(BT.1886 감마 2.4, ITU-R BT.1702-3 Table 1). 줄무늬 패턴 전용 —
+    휘도·적색 판정은 PEAT 실측대로 sRGB(`peat_rgb`)를 쓴다."""
     return np.power(c, DISPLAY_GAMMA)
 
 
@@ -264,60 +253,6 @@ def luminance_cd(rgb_lin):
     return Y * DISPLAY_PEAK_CD
 
 
-def saturated_red_ratio(rgb_lin):
-    """포화 적색 비율 R/(R+G+B) (선형 RGB 기준, WCAG 작업정의)"""
-    R, G, B = rgb_lin[..., 0], rgb_lin[..., 1], rgb_lin[..., 2]
-    return R / (R + G + B + 1e-6)
-
-
-def red_flash_value(rgb_lin):
-    """WCAG 적색 플래시 작업정의(2.0 시대, PEAT 구현 기준)의 적색도: (R−G−B)×320,
-    음수는 0. 두 상태 간 이 값의 변화가 RED_DELTA_THRESH(20)를 넘으면 적색 전환.
-
-    색공간 검증(2026-08): W3C 원문이 "R, G, B values range from 0-1 as specified
-    in 'relative luminance' definition"이라 명시 — 상대 휘도 정의의 R,G,B는
-    선형화(감마 제거) 값이므로 이 함수가 rgb_lin(선형)을 받는 것이 표준 그대로다.
-    ※ WCAG 2.1/2.2 Understanding의 2022년 '새 작업정의'는 CIE 1976 UCS 색차
-    >0.2 방식이지만, 공식 PEAT는 ×320 방식을 구현하므로 PEAT 재현 목표상 이쪽을 따른다."""
-    v = rgb_lin[..., 0] - rgb_lin[..., 1] - rgb_lin[..., 2]
-    return np.clip(v, 0.0, None) * 320.0
-
-
-def local_area_fraction(mask):
-    """
-    WCAG/PEAT '10도 시야각' 면적: 전체 화면이 아니라, 화면의 ~1/9 크기
-    (가로·세로 1/3) 로컬 영역 안의 최대 깜빡임 밀도를 반환.
-    341×256 @1024×768 ≈ 화면 (1/3, 1/3) 영역에 해당. boxFilter로 슬라이딩 평균.
-    """
-    H, W = mask.shape
-    kh, kw = max(1, H // 3), max(1, W // 3)
-    local = cv2.boxFilter(mask.astype(np.float32), -1, (kw, kh), normalize=True)
-    # 박스가 화면 안에 완전히 들어가는 '유효' 중심만 취함 — 기본 border 반사가
-    # 모서리 플래시를 거울상으로 복제해 밀도를 과대평가하는 것을 방지.
-    y0, x0 = kh // 2, kw // 2
-    return float(local[y0:y0 + H - kh + 1, x0:x0 + W - kw + 1].max())
-
-
-def harmful_luminance_mask(L_a, L_b):
-    """
-    두 휘도 상태(cd/m²) 사이 변화가 유해 기준을 넘는 픽셀 마스크.
-      - 어두운 쪽 < 160 cd/m²: 차이 ≥ 20 cd/m² (ITU-R BT.1702-3 / WCAG 동일)
-      - 어두운 쪽 ≥ 160 cd/m²: Michelson 대비 ≥ 1/17 — **의도적 보수성(표준 초과)**.
-        WCAG/ITU는 어두운 쪽이 상대휘도 0.8(=160 cd/m²) 이상이면 완전 면제하지만,
-        고휘도 대비 점멸도 잡도록 Michelson 기준을 유지한다 (위양성 방향으로만 작용).
-    """
-    darker = np.minimum(L_a, L_b)
-    brighter = np.maximum(L_a, L_b)
-    diff = brighter - darker
-    low_region = (darker < DARK_BOUND_CD) & (diff >= FLASH_DELTA_CD)
-    michelson = diff / (brighter + darker + 1e-6)
-    high_region = (darker >= DARK_BOUND_CD) & (michelson >= MICHELSON_THRESH)
-    return low_region | high_region
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# 공간 패턴(줄무늬) 분석 — Harding/Wilkins (근사 구현)
-# ──────────────────────────────────────────────────────────────────────────
 def _stripe_axis(profile):
     """
     1D 휘도 프로파일(cd/m²)에서 지배적 줄무늬 주파수를 FFT로 검출.
@@ -385,7 +320,6 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
     fps = cap.get(cv2.CAP_PROP_FPS)
     fps = fps if fps > 0 else 30.0
     effective_fps = fps / max(1, downsample)
-    pace_safe = PACE_SAFE_50HZ if fps <= 55 else PACE_SAFE_60HZ
     window_frames = max(1, int(round(window_seconds * effective_fps)))
 
     # 진행률 표시용 총 처리 프레임 수 (추정)
@@ -399,7 +333,7 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
     sat_area_series = []       # 포화 적색 존재 면적(전환 무관 — 적색 활동선용)
 
     # 휘도·적색: PEAT식 픽셀 엔진
-    engine = PeatEngine(window_frames, effective_fps)
+    engine = PeatEngine(window_frames, effective_fps, area_threshold)
     lum_count, lum_fail_flags, lum_risk, lum_area_series = [], [], [], []
     red_count, red_fail_flags, red_risk, red_area_series = [], [], [], []
 
@@ -524,7 +458,6 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         "effective_fps": effective_fps,
         "frames_processed": processed,
         "display_peak_cd": DISPLAY_PEAK_CD,
-        "pace_safe_ms": pace_safe * 1000.0,
         "luminance_fail": lum_fail,
         "red_fail": red_fail,
         "pattern_fail": pattern_fail,
@@ -627,7 +560,7 @@ def count_to_activity_y(counts, band_top, ymax, risk=None):
 def print_summary(metrics):
     s = metrics["summary"]
     print("=== PEAT (Harding/ITU-R BT.1702-3) 분석 결과 ===")
-    for key in ("fps", "effective_fps", "frames_processed", "display_peak_cd", "pace_safe_ms"):
+    for key in ("fps", "effective_fps", "frames_processed", "display_peak_cd"):
         print(f"  {key}: {s[key]}")
     print("  ─ 판정 ─")
     print(f"  휘도 플래시 FAIL:   {s['luminance_fail']}")
@@ -700,7 +633,7 @@ def plot_unified(metrics):
 def main():
     ap = argparse.ArgumentParser(description="PEAT 충실 재구현 (Harding/ITU-R BT.1702-3)")
     ap.add_argument("--video", required=True, help="입력 비디오 경로")
-    ap.add_argument("--area_threshold", type=float, default=AREA_THRESHOLD, help="플래시 면적 임계 (기본 0.25)")
+    ap.add_argument("--area_threshold", type=float, default=AREA_THRESHOLD, help="10° 박스 플래시 면적 임계 (기본 0.25 초과)")
     ap.add_argument("--window", type=float, default=WINDOW_SECONDS, help="슬라이딩 윈도우 초 (기본 1.0)")
     ap.add_argument("--downsample", type=int, default=1, help="N번째 프레임만 처리 (기본 1)")
     ap.add_argument("--max_frames", type=int, default=0, help="처리 프레임 제한 (0=무제한)")

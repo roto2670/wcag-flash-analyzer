@@ -36,7 +36,7 @@ python peat.py --video ./temp/<영상파일> --no_show  # 그래프 없이 콘�
 ./build.sh                                          # Nuitka로 PEAT_Analyzer 실행파일 빌드 (venv 활성화 필요)
 ```
 
-`peat.py` CLI 인자: `--window`(기본 1.0초), `--downsample N`, `--max_frames N`, `--no_pattern`(줄무늬 패턴 분석 끄기), `--no_show`. 콘솔에는 항상 휘도/적색/패턴별 PASS·FAIL 요약을 출력한다(`print_summary`).
+`peat.py` CLI 인자: `--area_threshold`(10° 박스 면적 임계, 기본 0.25 초과), `--window`(기본 1.0초), `--downsample N`, `--max_frames N`, `--no_pattern`(줄무늬 패턴 분석 끄기), `--no_show`. 콘솔에는 항상 휘도/적색/패턴별 PASS·FAIL 요약을 출력한다(`print_summary`).
 
 테스트 데이터(전부 gitignore):
 
@@ -113,7 +113,7 @@ PEAT의 FAIL 프레임 = 위험도 ≥ 500(0.5). QA PC(Windows, 원격 접속)�
 ### 핵심 상수 (`peat.py` 상단)
 
 - 휘도·적색 엔진: `PEAT_WIDTH=288`, `PEAT_COUNT_DY=0.048`, `PEAT_FLASH_DY=0.095`, `PEAT_DARK_Y=0.8`, `PEAT_RED_COUNT=10`, `PEAT_RED_FLASH=20`, `PEAT_RED_SAT=0.84`, `PEAT_MOTION_R=5`, `PEAT_RECENT_S=7/30`, `PEAT_RECENT_AREA=0.10`, `AREA_THRESHOLD=0.25`, `FAIL_TRANSITIONS=7`, `RISK_FAIL=0.5`, `RISK_MAX=3.4`, `RISK_MIN_H=0.10`.
-- 패턴·Extended: `DISPLAY_GAMMA=2.4`, `DISPLAY_PEAK_CD=200`, `PATTERN_MIN_PAIRS=5`, `PATTERN_LIGHT_CD=50`, `PATTERN_MIN_SECONDS=0.5`, `EXTENDED_SECONDS=5.0`.
+- 패턴·Extended: `DISPLAY_GAMMA=2.4`, `DISPLAY_PEAK_CD=200`, `FLASH_DELTA_CD=20`, `PATTERN_MIN_PAIRS=5`, `PATTERN_LIGHT_CD=50`, `PATTERN_MIN_SECONDS=0.5`, `EXTENDED_SECONDS=5.0`.
 
 ### 알려진 근사/한계
 
@@ -122,4 +122,3 @@ PEAT의 FAIL 프레임 = 위험도 ≥ 500(0.5). QA PC(Windows, 원격 접속)�
 - **mp4 vs PEAT 녹화본**: PEAT 정답은 브라우저 화면 녹화(288×216, 브라우저 UI·여백 포함, 24fps 영상은 30fps로 녹화)에 대한 것이다. 원본 mp4를 직접 분석하면 10° 박스·이동 허용 거리의 영상 대비 비율과 프레임 간격이 달라 결과가 조금 다를 수 있다. 엔진은 AVI(PEAT 입력) 기준으로 맞춘다.
 - **패턴 면적**: `detect_stripe_pattern`은 검출 시 면적을 1.0으로 근사. 자연 영상에서 위양성 가능 → `--no_pattern`(CLI) / 체크박스(GUI)로 끌 수 있음.
 - **HDR 미지원**: SDR sRGB 가정. HLG/PQ 영상은 부정확.
-- **정리 필요(미사용 잔재)**: 이전 엔진의 `harmful_luminance_mask`, `saturated_red_ratio`, `red_flash_value`, `local_area_fraction`, `MICHELSON_THRESH`/`DARK_BOUND_CD`/`RED_RATIO_THRESH`/`RED_DELTA_THRESH`/`PACE_SAFE_*`가 남아 있다. `analyze_video(area_threshold=…)`와 CLI `--area_threshold`는 현재 엔진에서 **무시된다**(엔진은 `AREA_THRESHOLD` 상수 사용).
