@@ -1,5 +1,6 @@
 temp/
 test_vid/
+test_fpa/
 *.png
 *.iml
 .idea/
