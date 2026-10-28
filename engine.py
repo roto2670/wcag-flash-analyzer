@@ -384,7 +384,7 @@ def detect_stripe_pattern(L_cd, moving):
 # ──────────────────────────────────────────────────────────────────────────
 def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
                   window_seconds=WINDOW_SECONDS, downsample=1, max_frames=0,
-                  enable_pattern=True, on_frame=None, should_stop=None, engine="fpacore"):
+                  enable_pattern=False, on_frame=None, should_stop=None, engine="fpacore"):
     """비디오 전체를 분석하고 metrics(dict)를 반환한다. GUI/CLI 공용 단일 소스.
 
     engine: "fpacore"(이 파일의 fpaCore 수식 엔진, 기본) 또는 "ex"(참조 코드 기반, engine_ex.py)
@@ -661,7 +661,8 @@ def main():
     ap.add_argument("--window", type=float, default=WINDOW_SECONDS, help="슬라이딩 윈도우 초 (기본 1.0)")
     ap.add_argument("--downsample", type=int, default=1, help="N번째 프레임만 처리 (기본 1)")
     ap.add_argument("--max_frames", type=int, default=0, help="처리 프레임 제한 (0=무제한)")
-    ap.add_argument("--no_pattern", action="store_true", help="줄무늬 패턴 분석 비활성화")
+    ap.add_argument("--pattern", action="store_true",
+                    help="줄무늬 패턴 분석 켜기 (기본 꺼짐 — PEAT는 패턴 판정을 하지 않음)")
     ap.add_argument("--no_show", action="store_true", help="그래프 창 없이 요약만 출력")
     ap.add_argument("--engine", choices=("fpacore", "ex"), default="fpacore",
                     help="fpacore: fpaCore 수식 엔진(기본) / ex: 참조 코드(flash_analyzer_ex) 기반")
@@ -677,7 +678,7 @@ def main():
         window_seconds=args.window,
         downsample=args.downsample,
         max_frames=args.max_frames,
-        enable_pattern=not args.no_pattern,
+        enable_pattern=args.pattern,
         engine=args.engine,
     )
     print_summary(metrics)

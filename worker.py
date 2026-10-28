@@ -28,7 +28,7 @@ class AnalysisWorker(QThread):
 
     def __init__(self, video_path, area_threshold=AREA_THRESHOLD,
                  window_seconds=WINDOW_SECONDS, downsample=1,
-                 max_frames=0, enable_pattern=True, engine="fpacore"):
+                 max_frames=0, enable_pattern=False, engine="fpacore"):
         super().__init__()
         self.video_path = video_path
         self.area_threshold = area_threshold

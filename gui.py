@@ -269,7 +269,7 @@ class PEATMainWindow(QMainWindow):
         opt_row.addWidget(self.spin_downsample)
 
         self.chk_pattern = QCheckBox("줄무늬 패턴 분석")
-        self.chk_pattern.setChecked(True)
+        self.chk_pattern.setChecked(False)   # PEAT는 패턴 판정을 하지 않음 — 필요할 때만 켬
         opt_row.addWidget(self.chk_pattern)
 
         # PEAT 'Show warnings'처럼 경고 수준(위험도 0.1~0.4) 표시를 끌 수 있게 (2차 QA 기능 외 #7)
