@@ -1,6 +1,7 @@
 temp/
 test_vid/
 test_fpa/
+bin/
 *.png
 *.iml
 .idea/

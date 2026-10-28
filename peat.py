@@ -70,13 +70,30 @@ PEAT_RECENT_S = 7 / 30.0  # FAIL 유지에 필요한 최근 플래시 시간창
 PEAT_RECENT_AREA = 0.10   # 최근 플래시 픽셀의 10° 박스 면적 하한
 # 적색(합성 테스트 8차): WCAG 적색값 (R−G−B)×320을 sRGB 선형값으로 계산(감마 2.4는 r75·80 FAIL을 놓침).
 #   플래시 기준 20(r70=19.6 안 셈, r75=22.5 셈), 전환 수 기준은 더 낮음(r60=14.5도 셈),
-#   포화 적색 R/(R+G+B)는 0.8보다 엄격(255,80,80=0.86 셈 / 255,95,95=0.81 안 셈 → 중간 0.84).
+#   포화 적색 R/(R+G+B) 경계는 0.8이 아니라 약 0.816(합성 9차: (255,94,94)=0.8171 셈,
+#   (255,95,95)=0.8145 안 셈; 초록·파랑만 섞어도 같은 비율에서 같은 결과 → 공식 R/(R+G+B) 확인).
 #   위험 세기 = 1.8×적색값 변화+229 (혼합색 포함 오차 1% 안), 면적 25% 초과·FAIL 종료는 휘도와 같음.
 PEAT_RED_FLASH = 20.0
 PEAT_RED_COUNT = 10.0
-PEAT_RED_SAT = 0.84
+PEAT_RED_SAT = 0.816
 RISK_FAIL = 0.5           # PEAT 위험도 합격선
 RISK_MAX = 3.4            # PEAT 위험도 천장
+# 휘도(2026-10-28, FPA 13개 프레임 대조로 맞춤 — 전환 수 일치 72.8%→89.2%, ±1 이내 99.3%):
+#  - 휘도 = 채널별 sRGB 선형값×200을 정수 cd/m²로 반올림 → Rec.709 고정소수점 가중합(>>16).
+#  - 블록(36px) 히스토그램(0~200 cd/m² 61칸) 차이 L1 > 0.36×블록 픽셀 수인 블록만 '실제 밝기
+#    변화'로 보고, 나머지는 움직임으로 보아 전환을 세지 않는다. 물체가 움직여도 블록 밝기 분포는
+#    거의 그대로라 이 구분이 이동 허용 규칙(±5px 이웃)보다 PEAT에 가깝다. 픽셀을 옮겨 맞추는
+#    이동 보정이나 '옮긴 블록' 히스토그램 비교는 오히려 PEAT와 멀어졌다.
+#  - 전환 = 같은 위치 직전 프레임 대비 ±7 cd/m² 초과 + 방향 교대(기대 방향), 1초 창 전환이
+#    0이 되면 기대 방향 초기화. 면적은 화면 0.4×0.4 박스(1/3 박스보다 FAIL 경계가 PEAT에 가까움).
+PEAT_PEAK_CD = 200.0
+PEAT_HIST_BLOCK = 36      # PEAT_WIDTH 기준 블록 크기(px)
+PEAT_HIST_BINS = 61
+PEAT_HIST_THR = 0.36
+PEAT_LUM_COUNT_CD = 7.0   # 전환 수용 변화 기준
+PEAT_LUM_FLASH_CD = PEAT_FLASH_DY * PEAT_PEAK_CD   # 플래시(FAIL·위험도)용 변화 기준
+PEAT_DARK_CD = PEAT_DARK_Y * PEAT_PEAK_CD          # 어두운 쪽이 이 이상이면 플래시 아님
+PEAT_LUM_BOX = 0.4        # 휘도 면적 박스(화면 비율)
 
 _SRGB_LUT = np.arange(256, dtype=np.float32) / 255.0
 _SRGB_LUT = np.where(_SRGB_LUT <= 0.04045, _SRGB_LUT / 12.92,
@@ -115,10 +132,14 @@ def peat_red_mask(frame_bgr, prev_bgr):
     return (np.abs(va - vb) >= PEAT_RED_FLASH) & (sa | sb)
 
 
-def _box_area_map(mask):
-    """10° 박스(화면 1/3×1/3)가 화면 안에 완전히 들어가는 위치별 면적 비율."""
+def _box_area_map(mask, frac=None):
+    """박스(기본 10° = 화면 1/3×1/3, frac를 주면 화면의 frac배)가 화면 안에 완전히 들어가는
+    위치별 면적 비율."""
     H, W = mask.shape
-    kh, kw = max(1, H // 3), max(1, W // 3)
+    if frac is None:
+        kh, kw = max(1, H // 3), max(1, W // 3)
+    else:
+        kh, kw = max(1, int(round(H * frac))), max(1, int(round(W * frac)))
     loc = cv2.boxFilter(mask.astype(np.float32), -1, (kw, kh), normalize=True)
     y0, x0 = kh // 2, kw // 2
     return loc[y0:y0 + H - kh + 1, x0:x0 + W - kw + 1]
@@ -204,6 +225,101 @@ class _PeatChannel:
         return {"count": count, "fail": fail, "risk": risk, "area": recent_area}
 
 
+def _risk_from_a7(a7):
+    """1초 전환 ≥7 픽셀 면적(박스 비율) → FAIL 중 PEAT 휘도 위험도 (FPA 13개 맞춤)."""
+    return float(np.clip(0.65 + 8.75 * max(a7 - AREA_THRESHOLD, 0.0) ** 1.2, RISK_FAIL, RISK_MAX))
+
+
+def peat_lum_cd(frame_bgr):
+    """BGR 프레임 → PEAT 기준 폭의 정수 휘도(cd/m², float32 배열)."""
+    lin = np.rint(peat_rgb(frame_bgr) * PEAT_PEAK_CD).astype(np.int64)
+    return ((13933 * lin[..., 2] + 46871 * lin[..., 1] + 4732 * lin[..., 0]) >> 16).astype(np.float32)
+
+
+def _block_hist(L, b, bins):
+    """블록(b×b)별 휘도 히스토그램 (by, bx, bins). 0~PEAT_PEAK_CD를 bins칸으로."""
+    H, W = L.shape
+    by, bx = H // b, W // b
+    q = np.clip(np.rint(L[:by * b, :bx * b] / PEAT_PEAK_CD * (bins - 1)), 0, bins - 1).astype(np.int32)
+    blk = q.reshape(by, b, bx, b).transpose(0, 2, 1, 3).reshape(by * bx, b * b)
+    idx = blk + (np.arange(by * bx) * bins)[:, None]
+    return np.bincount(idx.ravel(), minlength=by * bx * bins).reshape(by, bx, bins)
+
+
+class _FrameDiffTransitions:
+    """직전 프레임 대비 ±thr 초과 변화 + 블록 플래그 + 방향 교대 → 전환, 최근 1초 이력.
+    1초 창 전환이 0이 되면 기대 방향을 초기화한다."""
+
+    def __init__(self, shape, thr, window_frames, dark=None):
+        self.thr, self.dark, self.wf = thr, dark, window_frames
+        self.expect = np.zeros(shape, np.int8)   # 다음에 셀 방향: +1 밝아짐, −1 어두워짐, 0 아무쪽
+        self.hist = np.zeros((window_frames,) + shape, bool)
+        self.age = np.full(shape, 9999, np.int32)
+        self.i = 0
+
+    def step(self, L, P, flag):
+        d = L - P
+        ok = flag if self.dark is None else flag & (np.minimum(L, P) < self.dark)
+        up = (d > self.thr) & ok & (self.expect >= 0)
+        dn = (d < -self.thr) & ok & (self.expect <= 0)
+        tr = up | dn
+        self.expect = np.where(up, -1, np.where(dn, 1, self.expect)).astype(np.int8)
+        self.age = np.where(tr, 0, np.minimum(self.age + 1, 9999))
+        self.hist[self.i % self.wf] = tr
+        self.i += 1
+        self.expect = np.where(self.hist.any(axis=0), self.expect, 0).astype(np.int8)
+
+    def counts(self):
+        return self.hist.sum(axis=0)
+
+
+class _HistLumChannel:
+    """휘도 채널: 블록 히스토그램 플래그 + 프레임차 전환. 반환 dict는 _PeatChannel과 같다."""
+
+    def __init__(self, window_frames, recent, area_thr=AREA_THRESHOLD):
+        self.wf, self.recent, self.area_thr = window_frames, recent, area_thr
+        self.prev = None
+
+    def update(self, L):
+        b = PEAT_HIST_BLOCK
+        H, W = L.shape
+        by, bx = H // b, W // b
+        if self.prev is None:
+            self.tc = _FrameDiffTransitions(L.shape, PEAT_LUM_COUNT_CD, self.wf)
+            self.tf = _FrameDiffTransitions(L.shape, PEAT_LUM_FLASH_CD, self.wf, PEAT_DARK_CD)
+            flag, P = np.zeros(L.shape, bool), L
+        else:
+            D = np.abs(_block_hist(L, b, PEAT_HIST_BINS) - _block_hist(self.prev, b, PEAT_HIST_BINS)).sum(-1)
+            flag = np.zeros(L.shape, bool)
+            flag[:by * b, :bx * b] = np.repeat(np.repeat(D > round(PEAT_HIST_THR * b * b), b, 0), b, 1)
+            P = self.prev
+        self.tc.step(L, P, flag)
+        self.tf.step(L, P, flag)
+        self.prev = L
+
+        C = self.tc.counts()
+        count = 0
+        for k in range(1, int(C.max()) + 1):
+            if _box_area_map(C >= k, PEAT_LUM_BOX).max() > self.area_thr + 1e-6:
+                count = k
+            else:
+                break
+        recent = self.tf.age < self.recent
+        recent_area = float(_box_area_map(recent, PEAT_LUM_BOX).max()) if recent.any() else 0.0
+        fail = count >= FAIL_TRANSITIONS and recent_area > PEAT_RECENT_AREA
+        risk = 0.0
+        if fail:
+            # FAIL 중 위험도 = 1초 전환 ≥7 픽셀 면적의 함수(FPA 564프레임 맞춤, 평균오차 0.33).
+            # '최근 7프레임' 면적은 프레임마다 출렁여 PEAT 점선의 계단·평탄 모양과 달랐다.
+            a7 = float(_box_area_map(C >= FAIL_TRANSITIONS, PEAT_LUM_BOX).max())
+            risk = _risk_from_a7(a7)
+        elif count >= FAIL_TRANSITIONS - 2 and recent.any():
+            level = min(count, FAIL_TRANSITIONS)
+            risk = _risk_from_area(float(_box_area_map(recent & (C >= level), PEAT_LUM_BOX).max()))
+            risk = min(risk, 0.4 if count >= FAIL_TRANSITIONS - 1 else 0.3)
+        return {"count": count, "fail": fail, "risk": risk, "area": recent_area}
+
+
 class PeatEngine:
     """프레임마다 update() → (휘도 dict, 적색 dict), 각 dict(count, fail, risk, area)."""
 
@@ -211,7 +327,7 @@ class PeatEngine:
         recent = max(1, int(round(PEAT_RECENT_S * fps)))
         r = PEAT_MOTION_R
         self.kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (2 * r + 1, 2 * r + 1))
-        self.lum = _PeatChannel(window_frames, recent, PEAT_COUNT_DY, PEAT_FLASH_DY, PEAT_DARK_Y, area_thr)
+        self.lum = _HistLumChannel(window_frames, recent, area_thr)
         self.red = _PeatChannel(window_frames, recent, PEAT_RED_COUNT, PEAT_RED_FLASH, area_thr=area_thr)
         self.prev_Y = self.prev_R = None
         self.sat = None
@@ -228,10 +344,9 @@ class PeatEngine:
         Rv = np.maximum(R - G - B, 0.0) * 320.0                # WCAG 적색값 (R−G−B)×320
         self.sat = R >= PEAT_RED_SAT * (R + G + B + 1e-6)      # 포화 적색
         first = self.prev_Y is None
-        ex_y = np.zeros(Y.shape, bool) if first else self._explained(Y, self.prev_Y)
         ex_r = np.zeros(Y.shape, bool) if first else self._explained(Rv, self.prev_R)
         self.prev_Y, self.prev_R = Y, Rv
-        return self.lum.update(Y, ex_y), self.red.update(Rv, ex_r, self.sat)
+        return self.lum.update(peat_lum_cd(frame_bgr)), self.red.update(Rv, ex_r, self.sat)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -510,51 +625,23 @@ def _rolling_mean(x, win):
 # ──────────────────────────────────────────────────────────────────────────
 # 출력
 # ──────────────────────────────────────────────────────────────────────────
-BAND_TOP_FRAC = 0.22  # 4단계 밴드가 차지하는 y축 하단 비율 — 공식 PEAT(ex.png)와 동일한 두께
+# ── 차트 (PEAT 결과창 실측: wuwa 화면 캡처의 픽셀 위치를 FPA 값과 프레임별로 대조) ──
+# 세로축은 위험도 단위 0~3.5 일직선 하나. 점선 = 위험도 그대로, 실선 = 전환 수 × 0.5/7
+# (전환 1회 = 같은 간격, 전환 7회 = 위험도 0.5 = FAIL 기준과 같은 높이). 밴드 경계는
+# 0.25(PASS) / 0.45(CAUTION(PASS), 검은 합격선) / 0.65(CAUTION(FAIL)), 그 위가 FAIL.
+CHART_YMAX = 3.5
+CHART_BANDS = (0.25, 0.45, 0.65)
+CHART_PASS_LINE = 0.45
 
 
-def count_to_band_y(counts, band_top):
-    """1초 윈도우 전환수 → 밴드 경계에 맞춘 y좌표 (구간별 선형 보간).
-
-      0                    → 0/4·band_top   PASS 바닥
-      FAIL_TRANSITIONS//3  → 1/4·band_top   PASS / CAUTION(PASS) 경계
-      FAIL_TRANSITIONS-1   → 2/4·band_top   CAUTION(PASS) / CAUTION(FAIL) 경계
-      FAIL_TRANSITIONS     → 3/4·band_top   CAUTION(FAIL) / FAIL 경계
-      2×FAIL_TRANSITIONS   → 4/4·band_top   천장 (이상은 클리핑)
-
-    자기 최댓값 정규화가 아니므로 선이 놓인 밴드가 그대로 그 시점의 등급이다.
-    """
-    onethird = max(1, FAIL_TRANSITIONS // 3)
-    xp = [0.0, float(onethird), float(FAIL_TRANSITIONS - 1),
-          float(FAIL_TRANSITIONS), float(FAIL_TRANSITIONS * 2)]
-    fp = [0.0, 0.25 * band_top, 0.50 * band_top, 0.75 * band_top, band_top]
-    return np.interp(np.asarray(counts, dtype=np.float32), xp, fp).astype(np.float32)
+def count_to_chart_y(counts):
+    """전환 수 → 차트 높이(위험도 단위). 7회 = 0.5."""
+    return np.asarray(counts, dtype=np.float32) * (RISK_FAIL / FAIL_TRANSITIONS)
 
 
-# FAIL 확정 구간의 점선 최소 높이 — PEAT는 딱 7회 FAIL(Lint 19초)도 합격선 위로 보이게 솟는다.
-RISK_MIN_H = 0.10
-
-
-def count_to_activity_y(counts, band_top, ymax, risk=None):
-    """점선 = PEAT '위험도 선'(보고서 Lum 0.0~3.4). risk가 있으면 그 값으로 그린다:
-      - 0.2 이하 바닥, 0.3/0.4(CAUTION)는 CAUTION 밴드 안, 0.5 이상(FAIL)은 FAIL 경계부터
-        천장(3.4)까지 비례. 판정 카운트(counts)가 FAIL 미만이면 위험도도 FAIL 밴드에 올리지 않는다.
-    risk가 없으면 횟수만으로 근사한다(적색)."""
-    c = np.asarray(counts, dtype=np.float32)
-    fail = float(FAIL_TRANSITIONS)
-    line = 0.75 * band_top
-    if risk is not None:
-        r = np.asarray(risk, dtype=np.float32)
-        below = np.interp(np.minimum(r, RISK_FAIL), [0.0, 0.2, 0.3, 0.4, RISK_FAIL],
-                          [0.0, 0.0, 0.25 * band_top, 0.5 * band_top, line])
-        h = (r - RISK_FAIL) / (RISK_MAX - RISK_FAIL)
-    else:
-        below = np.interp(c, [0.0, fail - 3, fail - 2, fail - 1, fail],
-                          [0.0, 0.0, 0.25 * band_top, 0.5 * band_top, line])
-        h = (c - fail) / 9.0
-    h = np.clip(h, RISK_MIN_H, 1.0)
-    above = line + h * (0.95 * ymax - line)
-    return np.where(c < fail, below, above).astype(np.float32)
+def risk_to_chart_y(risk):
+    """위험도 → 차트 높이 (그대로, 0~RISK_MAX)."""
+    return np.clip(np.asarray(risk, dtype=np.float32), 0.0, RISK_MAX)
 
 
 def print_summary(metrics):
@@ -572,60 +659,43 @@ def print_summary(metrics):
 
 
 def plot_unified(metrics):
-    """공식 PEAT 결과창(ex.png) 모방. 공식 정의대로 시리즈 매핑:
-      - Luminance/Red flash (점선) = 플래시 '활동'(면적의 1초 윈도우 강도) — 메인, 솟음
-      - Lum/Red flash diag (실선) = 플래시 '카운트' — 보조
-      - Extended Flash (파란) = 경고 발생(≥0.8) 시에만 표시
-    플래시 선 높이는 자기 최댓값 정규화가 아니라 전환수 임계를 밴드 경계에 고정한 값이다.
-    """
+    """공식 PEAT 결과창 모양으로 그린다(GUI와 같은 규칙: 위험도 축 0~3.5, 점선 = 위험도,
+    실선 = 전환 수×0.5/7, 밴드 0.25/0.45/0.65, 검은 합격선 0.45)."""
     t = metrics["times"]
     verdict = metrics["summary"]["verdict"]
-
     ext = metrics["extended_series"]
-    ext_disp = np.where(ext >= 0.8, ext, 0.0)               # 경고 발생 시에만
-
-    ymax = 10.0
-    band_top = ymax * BAND_TOP_FRAC
-    h = band_top / 4
-
-    # 선 높이를 밴드에 맞춤: 자기 최댓값 정규화 대신 전환수 임계를 밴드 경계에 고정.
-    # 점선(활동선) = 판정 카운트 — FAIL 초과 시 밴드를 뚫고 천장까지 (ex.png 모양).
-    # 실선(diag) = 게이트(모션 제외) 전 원시 반전 후보의 '플래시 수'(전환÷2) —
-    # 공식 PEAT diag처럼 낮은 활동까지 길게 이어지고 정점이 CAUTION(FAIL) 부근에 머묾.
-    lum_act = count_to_activity_y(metrics["lum_window"], band_top, ymax,
-                                  metrics.get("lum_risk"))
-    red_act = count_to_activity_y(metrics["red_window"], band_top, ymax, metrics.get("red_risk"))
-    lum_cnt = count_to_band_y(metrics["lum_window_raw"] / 2.0, band_top)
-    red_cnt = count_to_band_y(metrics["red_window_raw"] / 2.0, band_top)
 
     fig, ax = plt.subplots(figsize=(12, 6))
-    ax.set_facecolor("#cfd2d6")
+    ax.set_facecolor("#c9ccd0")
+    lo = 0.0
+    for lab, hi, shade in zip(["PASS", "CAUTION (PASS)", "CAUTION (FAIL)"], CHART_BANDS,
+                              ["#c9ccd0", "#b3b7bb", "#b3b7bb"]):
+        ax.axhspan(lo, hi, color=shade, zorder=0)
+        ax.text((t[0] if len(t) else 0), (lo + hi) / 2, "  " + lab, va="center", ha="left",
+                fontsize=8, color="#888", zorder=1)
+        lo = hi
+    ax.text((t[0] if len(t) else 0), CHART_BANDS[2] + 0.1, "  FAIL", va="center", ha="left",
+            fontsize=8, color="#888", zorder=1)
+    ax.axhline(CHART_PASS_LINE, color="black", linewidth=0.8, zorder=1)
 
-    # 4단계 밴드(하단 얇게) + 좌측 레이블
-    for i, (lab, sh) in enumerate(zip(
-            ["PASS", "CAUTION (PASS)", "CAUTION (FAIL)", "FAIL"],
-            ["#c8cbcf", "#bfc3c7", "#b6babe", "#adb1b5"])):
-        ax.axhspan(i * h, (i + 1) * h, color=sh, zorder=0)
-        ax.text((t[0] if len(t) else 0), i * h + h / 2, "  " + lab,
-                va="center", ha="left", fontsize=8, color="#777", zorder=1)
-
-    # 메인: 휘도 활동(점선) — ex.png에서 천장까지 솟는 'Luminance flash'
-    ax.plot(t, lum_act, color="white", linestyle="--", linewidth=1.8, label="Luminance flash")
-    # 하단: 적색 존재(점선) — 7~8초 표시
-    ax.plot(t, red_act, color="red", linestyle="--", linewidth=1.6, label="Red flash")
-    # Extended Flash — 경고 발생 시에만 (PEAT_wuwa는 미발생 → 안 보임)
-    ax.plot(t, ext_disp * band_top, color="blue", linewidth=1.2, label="Extended Flash")
-    # 하단: 카운트(실선) — Lum/Red flash diag
-    ax.plot(t, lum_cnt, color="white", linewidth=1.0, label="Lum flash diag")
-    ax.plot(t, red_cnt, color="darkred", linewidth=1.0, label="Red flash diag")
+    ax.plot(t, risk_to_chart_y(metrics["lum_risk"]), color="white", linestyle=":", linewidth=2.2,
+            label="Luminance flash")
+    ax.plot(t, risk_to_chart_y(metrics["red_risk"]), color="red", linestyle=":", linewidth=2.0,
+            label="Red flash")
+    ax.plot(t, np.where(ext >= 0.8, ext * CHART_BANDS[0], 0.0), color="blue", linewidth=1.2,
+            label="Extended Flash")
+    ax.plot(t, count_to_chart_y(metrics["lum_window_raw"]), color="white", linewidth=1.0,
+            label="Lum flash diag")
+    ax.plot(t, count_to_chart_y(metrics["red_window_raw"]), color="darkred", linewidth=1.0,
+            label="Red flash diag")
 
     ax.set_xlabel("Time (s)")
     ax.set_yticks([])
-    ax.set_ylim(0, ymax)
+    ax.set_ylim(0, CHART_YMAX)
     ax.set_xlim(t[0] if len(t) else 0, t[-1] if len(t) else 1)
     ax.set_title(f"PEAT (Harding / ITU-R BT.1702-3)   —   {verdict}")
     legend = ax.legend(loc="upper right", fontsize=7)
-    legend.get_frame().set_facecolor("#cfd2d6")
+    legend.get_frame().set_facecolor("#c9ccd0")
     plt.tight_layout()
     plt.show()
 

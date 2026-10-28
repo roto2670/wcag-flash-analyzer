@@ -79,7 +79,7 @@ PEAT의 FAIL 프레임 = 위험도 ≥ 500(0.5). QA PC(Windows, 원격 접속)�
 - **위험도**(`*_risk`, 0~3.4) = `_risk_from_area`: 0.459×(A/0.25)^3.07, A = 최근 플래시 픽셀 중 1초 전환 ≥7인 10° 면적(합성 실측 25.7%→0.5, 30%→0.8, 40%→1.9, 54%↑→3.4, 밝기와 무관). 7회 미만이면 5회 0.3·6회 0.4로 상한.
 
 1. **휘도** (`PeatEngine.lum`): Y = Rec.709 상대휘도(sRGB 선형). 전환 기준 `PEAT_COUNT_DY` 0.048(0↔60 안 셈, 64 셈), 플래시 기준 `PEAT_FLASH_DY` 0.095 ≈ 20cd(0↔86 안 셈, 88 셈), 어두운 쪽 Y ≥ `PEAT_DARK_Y` 0.8이면 플래시 아님(230↔255 FAIL, 235↔255 면제). 감마 2.4는 0↔96(PEAT FAIL)을 19cd로 환산해 놓쳤다. PEAT 휘도 세기(w2) = 545×ΔY+334(sRGB, 오차 0.3%).
-2. **적색** (`PeatEngine.red`): 값 = WCAG 적색값 `max(R−G−B,0)×320`(sRGB 선형). 플래시 기준 `PEAT_RED_FLASH` 20(r70=19.6 안 셈, r75=22.5 셈), 전환 기준 `PEAT_RED_COUNT` 10(r60=14.5도 셈). 지금 또는 극값 상태가 **포화 적색**(`R/(R+G+B) ≥ PEAT_RED_SAT` 0.84)일 때만 전환 — PEAT는 0.8보다 엄격((255,80,80)=0.86 셈, (255,95,95)=0.81 안 셈). PEAT 적색 세기(w3) = 1.8×적색값 변화+229. 이전의 감마 2.4·0.8 기준은 r75·r80 FAIL을 놓쳤다.
+2. **적색** (`PeatEngine.red`): 값 = WCAG 적색값 `max(R−G−B,0)×320`(sRGB 선형). 플래시 기준 `PEAT_RED_FLASH` 20(r70=19.6 안 셈, r75=22.5 셈), 전환 기준 `PEAT_RED_COUNT` 10(r60=14.5도 셈). 지금 또는 극값 상태가 **포화 적색**(`R/(R+G+B) ≥ PEAT_RED_SAT` 0.816)일 때만 전환 — PEAT 경계는 0.8이 아니라 0.815~0.817((255,94,94)=0.8171 셈, (255,95,95)=0.8145 안 셈, 초록·파랑만 섞어도 같은 비율에서 같은 결과). PEAT 적색 세기(w3) = 1.8×적색값 변화+229. 이전의 감마 2.4·0.8 기준은 r75·r80 FAIL을 놓쳤다.
 3. **줄무늬 패턴**: `detect_stripe_pattern` — 행/열 평균 프로파일 FFT로 지배 주파수 검출. **>5 광-암 쌍** + 광-암차 ≥20 cd/m² + 최고휘도 >50 cd/m²이면 패턴 후보, **≥0.5초 지속** 시 FAIL. PEAT에는 없는 축(Harding/Ofcom 기준).
 4. **Extended Flash**(`extended_series`): HardingFPA 정의 — FAIL 직전 '경고 수준'(1초 전환 ≥3, FAIL 미만) 플래시가 최근 5초의 80% 이상 지속된 정도(0~1). 실제 FAIL 중이거나 진단선이 CAUTION 밴드(전환 2) 아래면 0. 공식 PEAT 그래프의 파란 계단선. FPA로는 아직 검증 안 됨.
 5. **4단계 판정**(`summary["verdict"]`):
@@ -96,11 +96,14 @@ PEAT의 FAIL 프레임 = 위험도 ≥ 500(0.5). QA PC(Windows, 원격 접속)�
 
 ### 차트 매핑 (CLI `plot_unified` / GUI 공통)
 
-4단계 밴드는 y축 하단 `BAND_TOP_FRAC`(0.22)에 얇게 배치. **선 높이는 전환수 임계를 밴드 경계에 고정**(`count_to_band_y`): 0→PASS 바닥, `FAIL_TRANSITIONS//3`→1/4, `FAIL_TRANSITIONS-1`→2/4, `FAIL_TRANSITIONS`→3/4, `2×FAIL_TRANSITIONS`→천장. 선이 놓인 밴드가 그 시점의 등급이다.
+공식 PEAT 결과창(wuwa 화면 캡처)의 픽셀 위치를 FPA 값과 프레임별로 대조해 맞춘 규칙(2026-10-27). 우리 GUI에 PEAT FPA 값을 그대로 넣어 그렸을 때 PEAT 화면과 일치하는 것을 픽셀 단위로 확인함.
 
-- **Luminance / Red flash (점선)** = PEAT 위험도(`lum_risk`/`red_risk`)를 그대로 그림(`count_to_activity_y(counts, band_top, ymax, risk)`): 0.2 이하는 바닥, 0.3/0.4는 CAUTION 밴드, 0.5 이상은 FAIL 경계~천장(3.4)에 비례. 판정 카운트가 FAIL 미만이면 FAIL 밴드에 올리지 않음. FAIL 최소 높이 `RISK_MIN_H` 0.10. 실제 영상에서 점선 높이는 아직 근사(FAIL 구간 평균 오차 0.5~1.6 / 3.4 척도).
-- **Lum/Red flash diag (실선)** = 전환 수(`*_window_raw`, PEAT FPA 횟수와 같은 정의)의 `count_to_band_y`. GUI는 '플래시 수'(전환÷2) 스케일로 그린다.
-- **Extended Flash (파란선)** = `extended_series` ≥0.8일 때만 표시.
+- **세로축 하나 = 위험도 단위 0~`CHART_YMAX` 3.5, 일직선.**
+- **Luminance / Red flash (점선)** = 위험도(`lum_risk`/`red_risk`) 그대로(`risk_to_chart_y`).
+- **Lum / Red flash diag (실선)** = 전환 수 × 0.5/7(`count_to_chart_y`) — 전환 1회마다 같은 간격, 7회 = 위험도 0.5(FAIL 기준)와 같은 높이. 시각 t의 실선은 t 프레임까지 포함한 전환 수(PEAT FPA는 1프레임 늦게 기록).
+- **밴드**(`CHART_BANDS`): PASS 0~0.25, CAUTION(PASS) 0.25~0.45, CAUTION(FAIL) 0.45~0.65, 그 위 FAIL. 두 CAUTION 밴드만 어둡게. 검은 합격선은 0.45(`CHART_PASS_LINE`) — 위험도 0.4 이하 통과, 0.5 이상 실패 사이.
+- **Extended Flash (파란선)** = `extended_series` ≥0.8일 때만 표시(높이는 PEAT 실측 없음).
+- PEAT 화면의 x축은 `초.프레임`(05.10 = 5초 10프레임) 표기, 우리는 분:초.
 
 ### GUI 흐름 — `gui.py`
 
@@ -112,13 +115,12 @@ PEAT의 FAIL 프레임 = 위험도 ≥ 500(0.5). QA PC(Windows, 원격 접속)�
 
 ### 핵심 상수 (`peat.py` 상단)
 
-- 휘도·적색 엔진: `PEAT_WIDTH=288`, `PEAT_COUNT_DY=0.048`, `PEAT_FLASH_DY=0.095`, `PEAT_DARK_Y=0.8`, `PEAT_RED_COUNT=10`, `PEAT_RED_FLASH=20`, `PEAT_RED_SAT=0.84`, `PEAT_MOTION_R=5`, `PEAT_RECENT_S=7/30`, `PEAT_RECENT_AREA=0.10`, `AREA_THRESHOLD=0.25`, `FAIL_TRANSITIONS=7`, `RISK_FAIL=0.5`, `RISK_MAX=3.4`, `RISK_MIN_H=0.10`.
+- 휘도·적색 엔진: `PEAT_WIDTH=288`, `PEAT_COUNT_DY=0.048`, `PEAT_FLASH_DY=0.095`, `PEAT_DARK_Y=0.8`, `PEAT_RED_COUNT=10`, `PEAT_RED_FLASH=20`, `PEAT_RED_SAT=0.816`, `PEAT_MOTION_R=5`, `PEAT_RECENT_S=7/30`, `PEAT_RECENT_AREA=0.10`, `AREA_THRESHOLD=0.25`, `FAIL_TRANSITIONS=7`, `RISK_FAIL=0.5`, `RISK_MAX=3.4`. 차트: `CHART_YMAX=3.5`, `CHART_BANDS=(0.25, 0.45, 0.65)`, `CHART_PASS_LINE=0.45`.
 - 패턴·Extended: `DISPLAY_GAMMA=2.4`, `DISPLAY_PEAK_CD=200`, `FLASH_DELTA_CD=20`, `PATTERN_MIN_PAIRS=5`, `PATTERN_LIGHT_CD=50`, `PATTERN_MIN_SECONDS=0.5`, `EXTENDED_SECONDS=5.0`.
 
 ### 알려진 근사/한계
 
 - **움직임 판정**: 위 '검증 현황' 참고 — 큰 움직임(물보라·회전·빠른 패닝)에서 PEAT보다 예민할 수 있다(안전 쪽 오차).
-- **포화 적색 경계**: 0.81~0.86 사이까지만 확인해 0.84를 씀.
 - **mp4 vs PEAT 녹화본**: PEAT 정답은 브라우저 화면 녹화(288×216, 브라우저 UI·여백 포함, 24fps 영상은 30fps로 녹화)에 대한 것이다. 원본 mp4를 직접 분석하면 10° 박스·이동 허용 거리의 영상 대비 비율과 프레임 간격이 달라 결과가 조금 다를 수 있다. 엔진은 AVI(PEAT 입력) 기준으로 맞춘다.
 - **패턴 면적**: `detect_stripe_pattern`은 검출 시 면적을 1.0으로 근사. 자연 영상에서 위양성 가능 → `--no_pattern`(CLI) / 체크박스(GUI)로 끌 수 있음.
 - **HDR 미지원**: SDR sRGB 가정. HLG/PQ 영상은 부정확.

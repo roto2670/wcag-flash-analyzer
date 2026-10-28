@@ -54,8 +54,8 @@ class TimeAxisItem(pg.AxisItem):
         dec = 1 if spacing < 1 else 0
         return [fmt_mmss(v, dec) for v in values]
 from peat import (
-    FAIL_TRANSITIONS, BAND_TOP_FRAC,
-    count_to_band_y, count_to_activity_y,
+    FAIL_TRANSITIONS, CHART_YMAX, CHART_BANDS, CHART_PASS_LINE,
+    count_to_chart_y, risk_to_chart_y,
     peat_flash_mask, peat_red_mask,
 )
 
@@ -296,9 +296,9 @@ class PEATMainWindow(QMainWindow):
 
         pg.setConfigOptions(antialias=True, useOpenGL=False)
         self.plot_widget = pg.PlotWidget(axisItems={"bottom": TimeAxisItem(orientation="bottom")})
-        self.plot_widget.setBackground("#cfd2d6")
+        self.plot_widget.setBackground("#c9ccd0")
         self.plot_widget.showGrid(x=True, y=False, alpha=0.3)
-        self.plot_widget.setYRange(0, 10)
+        self.plot_widget.setYRange(0, CHART_YMAX, padding=0)
         self.plot_widget.hideAxis("left")
 
         x_axis = self.plot_widget.getAxis("bottom")
@@ -314,24 +314,28 @@ class PEATMainWindow(QMainWindow):
         self.plot_widget.getViewBox().enableAutoRange(axis='xy', enable=False)
         self.plot_widget.setXRange(0, 1)
 
-        # 밴드 — 두께는 peat.BAND_TOP_FRAC (공식 PEAT와 동일)
-        band_top = 10.0 * BAND_TOP_FRAC
-        h = band_top / 4
-        band_colors = ["#c8cbcf", "#bfc3c7", "#b6babe", "#adb1b5"]
-        band_labels = ["PASS", "CAUTION (PASS)", "CAUTION (FAIL)", "FAIL"]
-        for i, (color, label) in enumerate(zip(band_colors, band_labels)):
-            region = pg.LinearRegionItem(
-                values=[i * h, (i + 1) * h],
-                orientation="horizontal",
-                brush=pg.mkBrush(color),
-                movable=False,
-            )
+        # 밴드 — 공식 PEAT 결과창 실측(peat.CHART_BANDS): PASS·FAIL은 밝게, CAUTION 두 칸은 어둡게
+        lo = 0.0
+        for hi, color, label in zip(CHART_BANDS, ["#c9ccd0", "#b3b7bb", "#b3b7bb"],
+                                    ["PASS", "CAUTION (PASS)", "CAUTION (FAIL)"]):
+            region = pg.LinearRegionItem(values=[lo, hi], orientation="horizontal",
+                                         brush=pg.mkBrush(color), movable=False)
             region.setZValue(-10)
+            for ln in region.lines:
+                ln.setPen(pg.mkPen(None))
             self.plot_widget.addItem(region)
-            text = pg.TextItem(text=f"  {label}", color="#777", anchor=(0, 0.5))
-            text.setPos(0, i * h + h / 2)
+            text = pg.TextItem(text=f"  {label}", color="#888", anchor=(0, 0.5))
+            text.setPos(0, (lo + hi) / 2)
             text.setZValue(-5)
             self.plot_widget.addItem(text)
+            lo = hi
+        text = pg.TextItem(text="  FAIL", color="#888", anchor=(0, 0.5))
+        text.setPos(0, CHART_BANDS[2] + 0.1)
+        text.setZValue(-5)
+        self.plot_widget.addItem(text)
+        pass_line = pg.InfiniteLine(pos=CHART_PASS_LINE, angle=0, pen=pg.mkPen(color="black", width=1))
+        pass_line.setZValue(-4)
+        self.plot_widget.addItem(pass_line)
 
         # 커브
         legend = self.plot_widget.addLegend(offset=(10, 10))
@@ -339,9 +343,9 @@ class PEATMainWindow(QMainWindow):
         legend.setFlag(legend.GraphicsItemFlag.ItemIsMovable, False)
 
         self.curve_lum_act = self.plot_widget.plot(
-            pen=pg.mkPen(color="white", width=3, style=Qt.DashLine), name="Luminance flash")
+            pen=pg.mkPen(color="white", width=3, style=Qt.DotLine), name="Luminance flash")
         self.curve_red_act = self.plot_widget.plot(
-            pen=pg.mkPen(color="#FF5252", width=3, style=Qt.DashLine), name="Red flash")
+            pen=pg.mkPen(color="#FF5252", width=3, style=Qt.DotLine), name="Red flash")
         self.curve_lum_diag = self.plot_widget.plot(
             pen=pg.mkPen(color="white", width=1), name="Lum flash diag")
         self.curve_red_diag = self.plot_widget.plot(
@@ -573,17 +577,14 @@ class PEATMainWindow(QMainWindow):
         self.progress_bar.setValue(current)
 
     def _draw_band_curves(self, t, lum_act, red_act, lum_raw, red_raw, lum_risk=None, red_risk=None):
-        """밴드 매핑 곡선 갱신 — peat.py plot_unified와 동일 로직.
-        점선 = PEAT 위험도(lum_risk/red_risk, 0~3.4).
-        실선(diag) = 전환 수의 '플래시 수'(전환÷2) — 공식 PEAT diag 스케일. band_top을 반환."""
-        ymax = 10.0
-        band_top = ymax * BAND_TOP_FRAC
-        self.curve_lum_act.setData(t, count_to_activity_y(lum_act, band_top, ymax, lum_risk))
-        self.curve_red_act.setData(t, count_to_activity_y(red_act, band_top, ymax, red_risk))
-        self.curve_lum_diag.setData(t, count_to_band_y(lum_raw / 2.0, band_top))
-        self.curve_red_diag.setData(t, count_to_band_y(red_raw / 2.0, band_top))
+        """곡선 갱신 — peat.py plot_unified와 같은 규칙(공식 PEAT 결과창 실측).
+        점선 = 위험도 그대로, 실선 = 전환 수 × 0.5/7. 세로축은 위험도 0~3.5."""
+        zero = np.zeros(len(t), dtype=np.float32)
+        self.curve_lum_act.setData(t, risk_to_chart_y(zero if lum_risk is None else lum_risk))
+        self.curve_red_act.setData(t, risk_to_chart_y(zero if red_risk is None else red_risk))
+        self.curve_lum_diag.setData(t, count_to_chart_y(lum_raw))
+        self.curve_red_diag.setData(t, count_to_chart_y(red_raw))
         self.plot_widget.setXRange(0, t[-1] + 0.5, padding=0)
-        return band_top
 
     def _on_frame_result(self, data):
         self.times.append(data["time"])
@@ -632,18 +633,18 @@ class PEATMainWindow(QMainWindow):
             red_act = np.array(summary.get("red_window_act", summary["red_window"]), dtype=np.float32)
             ext = np.array(summary["extended_series"], dtype=np.float32)
             lum_risk, red_risk = summary.get("lum_risk"), summary.get("red_risk")
-            band_top = self._draw_band_curves(t, lum_act, red_act, lum_raw, red_raw,
+            self._draw_band_curves(t, lum_act, red_act, lum_raw, red_raw,
                                               None if lum_risk is None else np.asarray(lum_risk),
                                               None if red_risk is None else np.asarray(red_risk))
 
             # Extended Flash (파란선) — ≥0.8일 때만 표시
-            self.curve_extended.setData(t, np.where(ext >= 0.8, ext * band_top, 0.0))
+            self.curve_extended.setData(t, np.where(ext >= 0.8, ext * CHART_BANDS[0], 0.0))
 
             # 분석 완료 후 줌/슬라이드 활성화
             self.plot_widget.setMouseEnabled(x=True, y=True)
             self.plot_widget.setMenuEnabled(True)
             # 축 범위 제한: 음수 영역 + 영상 길이 밖으로 줌아웃 안 되게
-            self.plot_widget.setLimits(xMin=0, xMax=t[-1] + 0.5, yMin=0, yMax=10.0)
+            self.plot_widget.setLimits(xMin=0, xMax=t[-1] + 0.5, yMin=0, yMax=CHART_YMAX)
 
         # 판정 스타일 적용
         if verdict == "PASS":
