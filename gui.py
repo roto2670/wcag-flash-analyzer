@@ -9,12 +9,12 @@ import os
 import cv2
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QFileDialog, QProgressBar, QGroupBox,
-    QSpinBox, QDoubleSpinBox, QCheckBox, QStatusBar, QFrame,
+    QPushButton, QLabel, QFileDialog, QProgressBar,
+    QSpinBox, QCheckBox, QFrame,
     QLineEdit,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QFont, QColor
+from PyQt5.QtGui import QFont
 import pyqtgraph as pg
 import numpy as np
 
@@ -84,7 +84,6 @@ class DownloadWorker(QThread):
     def run(self):
         try:
             import subprocess
-            import tempfile
 
             os.makedirs(self.output_dir, exist_ok=True)
             output_template = os.path.join(self.output_dir, "%(title).50s.%(ext)s")

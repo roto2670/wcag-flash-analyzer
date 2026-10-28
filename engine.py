@@ -42,14 +42,10 @@ _SRGB_LUT = np.where(_SRGB_LUT <= 0.04045, _SRGB_LUT / 12.92,
                      np.power((_SRGB_LUT + 0.055) / 1.055, 2.4)).astype(np.float32)
 
 
-def _box_area_map(mask, frac=None):
-    """박스(기본 10° = 화면 1/3×1/3, frac를 주면 화면의 frac배)가 화면 안에 완전히 들어가는
-    위치별 면적 비율."""
+def _box_area_map(mask):
+    """박스(10° = 화면 1/3×1/3)가 화면 안에 완전히 들어가는 위치별 면적 비율."""
     H, W = mask.shape
-    if frac is None:
-        kh, kw = max(1, H // 3), max(1, W // 3)
-    else:
-        kh, kw = max(1, int(round(H * frac))), max(1, int(round(W * frac)))
+    kh, kw = max(1, H // 3), max(1, W // 3)
     loc = cv2.boxFilter(mask.astype(np.float32), -1, (kw, kh), normalize=True)
     y0, x0 = kh // 2, kw // 2
     return loc[y0:y0 + H - kh + 1, x0:x0 + W - kw + 1]
@@ -59,22 +55,18 @@ class _FrameDiffTransitions:
     """직전 프레임 대비 ±thr 초과 변화 + 블록 플래그 + 방향 교대 → 전환, 최근 1초 이력.
     1초 창 전환이 0이 되면 기대 방향을 초기화한다."""
 
-    def __init__(self, shape, thr, window_frames, dark=None):
-        self.thr, self.dark, self.wf = thr, dark, window_frames
+    def __init__(self, shape, thr, window_frames):
+        self.thr, self.wf = thr, window_frames
         self.expect = np.zeros(shape, np.int8)   # 다음에 셀 방향: +1 밝아짐, −1 어두워짐, 0 아무쪽
         self.hist = np.zeros((window_frames,) + shape, bool)
-        self.age = np.full(shape, 9999, np.int32)
         self.i = 0
 
     def step(self, L, P, flag):
         d = L - P
-        ok = flag if self.dark is None else flag & (np.minimum(L, P) < self.dark)
-        up = (d > self.thr) & ok & (self.expect >= 0)
-        dn = (d < -self.thr) & ok & (self.expect <= 0)
-        tr = up | dn
+        up = (d > self.thr) & flag & (self.expect >= 0)
+        dn = (d < -self.thr) & flag & (self.expect <= 0)
         self.expect = np.where(up, -1, np.where(dn, 1, self.expect)).astype(np.int8)
-        self.age = np.where(tr, 0, np.minimum(self.age + 1, 9999))
-        self.hist[self.i % self.wf] = tr
+        self.hist[self.i % self.wf] = up | dn
         self.i += 1
         self.expect = np.where(self.hist.any(axis=0), self.expect, 0).astype(np.int8)
 
