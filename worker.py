@@ -4,6 +4,8 @@ worker.py — QThread 기반 PEAT 분석 워커 (얇은 래퍼).
 시그널(progress/frame_result/finished/error)로 GUI에 전달만 한다.
 """
 
+import time
+
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from engine import AREA_THRESHOLD, WINDOW_SECONDS, analyze_video
@@ -14,19 +16,19 @@ class AnalysisWorker(QThread):
 
     Signals:
         progress(int, int): (현재 프레임 인덱스, 전체 프레임 수)
-        frame_result(dict): 매 프레임의 분석 결과 딕셔너리
+        frame_result(list): 프레임 분석 결과 딕셔너리 묶음 (0.25초마다)
         finished(dict): 최종 summary 딕셔너리
         error(str): 에러 메시지
     """
 
     progress = pyqtSignal(int, int)
-    frame_result = pyqtSignal(dict)
+    frame_result = pyqtSignal(list)
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
 
     def __init__(self, video_path, area_threshold=AREA_THRESHOLD,
                  window_seconds=WINDOW_SECONDS, downsample=1,
-                 max_frames=0, enable_pattern=True, emit_every=1, engine="fpacore"):
+                 max_frames=0, enable_pattern=True, engine="fpacore"):
         super().__init__()
         self.video_path = video_path
         self.area_threshold = area_threshold
@@ -34,9 +36,9 @@ class AnalysisWorker(QThread):
         self.downsample = downsample
         self.max_frames = max_frames
         self.enable_pattern = enable_pattern
-        self.emit_every = emit_every  # N프레임마다 시그널 전송
         self.engine = engine
         self._stop_flag = False
+        self._batch, self._last_emit = [], 0.0
 
     def stop(self):
         self._stop_flag = True
@@ -48,9 +50,20 @@ class AnalysisWorker(QThread):
             self.error.emit(str(e))
 
     def _on_frame(self, data):
-        if data["processed"] % self.emit_every == 0:
-            self.progress.emit(data["processed"], data["total"])
-            self.frame_result.emit(data)
+        # 프레임마다 시그널을 보내면 스레드 간 전환 비용이 분석보다 커서(90초 영상: 엔진 28초 / GUI 178초)
+        # 0.25초 분량씩 묶어 보낸다 (0.1초는 그래프 갱신 비용으로 29.7초 → 37.8초).
+        self._batch.append(data)
+        now = time.monotonic()
+        if now - self._last_emit >= 0.25:
+            self._flush()
+            self._last_emit = now
+
+    def _flush(self):
+        if self._batch:
+            last = self._batch[-1]
+            self.progress.emit(last["processed"], last["total"])
+            self.frame_result.emit(self._batch)
+            self._batch = []
 
     def _analyze(self):
         metrics = analyze_video(
@@ -66,6 +79,7 @@ class AnalysisWorker(QThread):
         )
         if metrics is None:  # 사용자 중단
             return
+        self._flush()
 
         # GUI 최종 차트용: summary에 전체 시계열 포함
         summary = dict(metrics["summary"])

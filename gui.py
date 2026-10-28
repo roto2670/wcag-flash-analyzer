@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QProgressBar,
     QSpinBox, QCheckBox, QFrame,
-    QLineEdit,
+    QLineEdit, QScrollArea,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont
@@ -337,9 +337,13 @@ class PEATMainWindow(QMainWindow):
         self.plot_widget.addItem(pass_line)
 
         # 커브
-        legend = self.plot_widget.addLegend(offset=(10, 10))
-        legend.setBrush(pg.mkBrush("#cfd2d6"))
-        legend.setFlag(legend.GraphicsItemFlag.ItemIsMovable, False)
+        # 범례는 그래프 위쪽 바깥에 한 줄로 — 안쪽에 두면 높은 위험도 선을 가린다 (2차 QA 기능 외 #2)
+        plot_item = self.plot_widget.getPlotItem()
+        legend = pg.LegendItem(colCount=5, horSpacing=10, labelTextColor="#222")
+        plot_item.legend = legend                    # plot(name=...)이 이 범례에 항목을 추가
+        plot_item.layout.removeItem(plot_item.titleLabel)   # 안 쓰는 제목 칸 자리에 범례
+        plot_item.titleLabel.hide()
+        plot_item.layout.addItem(legend, 0, 1, alignment=Qt.AlignLeft)
 
         self.curve_lum_act = self.plot_widget.plot(
             pen=pg.mkPen(color="white", width=3, style=Qt.DotLine), name="Luminance flash")
@@ -392,9 +396,15 @@ class PEATMainWindow(QMainWindow):
         self.lbl_fail_segments.setWordWrap(True)
         self.lbl_fail_segments.setOpenExternalLinks(False)
         self.lbl_fail_segments.linkActivated.connect(self._on_fail_segment_click)
-        right_panel.addWidget(self.lbl_fail_segments)
-
-        right_panel.addStretch()
+        self.lbl_fail_segments.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        # FAIL 구간이 많으면 패널 아래로 잘리던 문제 — 남는 공간을 채우고 넘치면 스크롤 (2차 QA 기능 외 #3)
+        self.fail_scroll = QScrollArea()
+        self.fail_scroll.setObjectName("failScroll")
+        self.fail_scroll.setWidgetResizable(True)
+        self.fail_scroll.setFrameShape(QFrame.NoFrame)
+        self.fail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.fail_scroll.setWidget(self.lbl_fail_segments)
+        right_panel.addWidget(self.fail_scroll, 1)
         center_layout.addLayout(right_panel, 1)
 
         layout.addLayout(center_layout, 1)
@@ -511,6 +521,7 @@ class PEATMainWindow(QMainWindow):
 
         # 초기화
         self.times.clear()
+        self._xrange_set = False
         self.lum_window_counts.clear()
         self.red_window_counts.clear()
         self.lum_raw_counts.clear()
@@ -583,18 +594,26 @@ class PEATMainWindow(QMainWindow):
         self.curve_red_act.setData(t, risk_to_chart_y(zero if red_risk is None else red_risk))
         self.curve_lum_diag.setData(t, count_to_chart_y(lum_raw))
         self.curve_red_diag.setData(t, count_to_chart_y(red_raw))
-        self.plot_widget.setXRange(0, t[-1] + 0.5, padding=0)
 
-    def _on_frame_result(self, data):
-        self.times.append(data["time"])
-        self.lum_window_counts.append(data["lum_window_count"])
-        self.red_window_counts.append(data["red_window_count"])
-        self.lum_raw_counts.append(data.get("lum_window_raw_count", 0))
-        self.red_raw_counts.append(data.get("red_window_raw_count", 0))
-        self.lum_act_counts.append(data.get("lum_act_count", data["lum_window_count"]))
-        self.red_act_counts.append(data.get("red_act_count", data["red_window_count"]))
-        self.lum_risk.append(data.get("lum_risk", 0.0))
-        self.red_risk.append(data.get("red_risk", 0.0))
+    def _on_frame_result(self, batch):
+        """워커가 0.25초마다 묶어 보낸 프레임 결과를 쌓고 그래프를 한 번 갱신."""
+        for data in batch:
+            self.times.append(data["time"])
+            self.lum_window_counts.append(data["lum_window_count"])
+            self.red_window_counts.append(data["red_window_count"])
+            self.lum_raw_counts.append(data.get("lum_window_raw_count", 0))
+            self.red_raw_counts.append(data.get("red_window_raw_count", 0))
+            self.lum_act_counts.append(data.get("lum_act_count", data["lum_window_count"]))
+            self.red_act_counts.append(data.get("red_act_count", data["red_window_count"]))
+            self.lum_risk.append(data.get("lum_risk", 0.0))
+            self.red_risk.append(data.get("red_risk", 0.0))
+        data = batch[-1]
+        # 가로축은 영상 전체 길이로 한 번만 잡는다 (PEAT처럼 왼쪽부터 채워짐). 매번 setXRange하면
+        # 눈금·격자 재계산이 분석 스레드를 붙잡아 90초 영상이 28초 → 140초가 됐다.
+        if not self._xrange_set and data["processed"] > 1:
+            dt = data["time"] / (data["processed"] - 1)
+            self.plot_widget.setXRange(0, max(1, data["total"] - 1) * dt + 0.5, padding=0)
+            self._xrange_set = True
 
         t_arr = np.array(self.times)
         lum_window = np.array(self.lum_window_counts, dtype=np.float32)
@@ -644,6 +663,7 @@ class PEATMainWindow(QMainWindow):
             self.plot_widget.setMenuEnabled(True)
             # 축 범위 제한: 음수 영역 + 영상 길이 밖으로 줌아웃 안 되게
             self.plot_widget.setLimits(xMin=0, xMax=t[-1] + 0.5, yMin=0, yMax=CHART_YMAX)
+            self.plot_widget.setXRange(0, t[-1] + 0.5, padding=0)
 
         # 판정 스타일 적용
         if verdict == "PASS":
@@ -678,6 +698,7 @@ class PEATMainWindow(QMainWindow):
         red_counts = np.array(self.red_window_counts, dtype=np.float32)
         fail_text = self._get_fail_timestamps_text(t, lum_counts, red_counts)
         self.lbl_fail_segments.setText(fail_text)
+        self.fail_scroll.verticalScrollBar().setValue(0)   # 새 결과는 맨 위부터
 
         # 내보내기 버튼 활성화
         self.btn_export.setEnabled(True)
@@ -1111,6 +1132,9 @@ def main():
         #detailsLabel {
             color: #a9b1d6;
             font-size: 11px;
+        }
+        #failScroll, #failScroll > QWidget > QWidget {
+            background: transparent;
         }
         #failSegments {
             color: #f7768e;

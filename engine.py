@@ -59,6 +59,7 @@ class _FrameDiffTransitions:
         self.thr, self.wf = thr, window_frames
         self.expect = np.zeros(shape, np.int8)   # 다음에 셀 방향: +1 밝아짐, −1 어두워짐, 0 아무쪽
         self.hist = np.zeros((window_frames,) + shape, bool)
+        self.count = np.zeros(shape, np.int16)  # 최근 1초 전환 수 (hist 합계를 누적으로 유지)
         self.i = 0
 
     def step(self, L, P, flag):
@@ -66,12 +67,15 @@ class _FrameDiffTransitions:
         up = (d > self.thr) & flag & (self.expect >= 0)
         dn = (d < -self.thr) & flag & (self.expect <= 0)
         self.expect = np.where(up, -1, np.where(dn, 1, self.expect)).astype(np.int8)
-        self.hist[self.i % self.wf] = up | dn
+        slot = self.i % self.wf
+        tr = up | dn
+        self.count += tr.astype(np.int16) - self.hist[slot]
+        self.hist[slot] = tr
         self.i += 1
-        self.expect = np.where(self.hist.any(axis=0), self.expect, 0).astype(np.int8)
+        self.expect[self.count == 0] = 0
 
     def counts(self):
-        return self.hist.sum(axis=0)
+        return self.count
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -117,6 +121,7 @@ _FPA_WALSH = np.array([          # W1..W11 (6.3절 표), 행 = 계수, 열 = a1.
     [-1, +1, -1, -1, +1, -1, +1, +1],
 ], np.int64)
 _FPA_CD = np.rint(_SRGB_LUT.astype(np.float64) * 200.0).astype(np.int64)    # L(p), 짝수 반올림
+_FPA_CD_F32 = _FPA_CD.astype(np.float32).reshape(256, 1)   # cv2.LUT용
 _v = np.arange(201, dtype=np.float64) / 200.0
 _FPA_INV = np.rint(255.0 * np.where(_v <= 0.0031308, 12.92 * _v,
                                     1.055 * np.power(_v, 1 / 2.4) - 0.055)).astype(np.int64)   # L⁻¹(cd)
@@ -132,13 +137,9 @@ def fpa_channels_cd(frame_bgr, width=FPA_ANALYSIS_W):
     """BGR 프레임 → 분석 폭의 채널별 정수 cd (L(R), L(G), L(B)). 1절의 이중 양자화 축소."""
     H, W = frame_bgr.shape[:2]
     size = (width, max(3, int(round(H * width / W))))
-    out = []
-    for c in (2, 1, 0):
-        L = _FPA_CD[frame_bgr[..., c]].astype(np.float32)
-        avg = cv2.resize(L, size, interpolation=cv2.INTER_AREA)
-        p = _FPA_INV[np.clip(np.rint(avg), 0, 200).astype(np.int64)]
-        out.append(_FPA_CD[p])
-    return out
+    avg = cv2.resize(cv2.LUT(frame_bgr, _FPA_CD_F32), size, interpolation=cv2.INTER_AREA)   # 세 채널 한 번에
+    L = _FPA_CD[_FPA_INV[np.clip(np.rint(avg), 0, 200).astype(np.int64)]]
+    return L[..., 2], L[..., 1], L[..., 0]
 
 
 def _fpa_block_flag(V, Vp, thr_frac):
@@ -233,12 +234,16 @@ class _FpaChannel:
             best = best[np.argmax(nD.ravel()[best])]
             f, a_pct = float(fW.ravel()[best]), 100.0 * nD.ravel()[best] / roi
         r = round(f)                                                      # 8절 (짝수 반올림)
-        count = 0                                                         # 진단선: 창에서 h(k) > 25%인 최대 k
-        for k in range(1, 31):
-            if _window_sums(C >= k, kh, kw).max() > round(roi * self.area_pct / 100):
-                count = k
+        # 진단선: 창에서 h(k) > 25%인 최대 k (1~30). C≥k 면적은 k에 대해 단조 감소라 이분 탐색
+        need = round(roi * self.area_pct / 100)
+        lo, hi = 0, min(30, int(C.max()))
+        while lo < hi:
+            k = (lo + hi + 1) // 2
+            if _window_sums(C >= k, kh, kw).max() > need:
+                lo = k
             else:
-                break
+                hi = k - 1
+        count = lo
         return {"count": count, "fail": r >= 5, "warn": 1 <= r <= 4, "risk": r / 10.0,
                 "area": a_pct / 100.0}
 
@@ -315,19 +320,15 @@ def red_mask(frame_bgr, prev_bgr):
 # ──────────────────────────────────────────────────────────────────────────
 # 색/휘도 변환
 # ──────────────────────────────────────────────────────────────────────────
-def bgr_to_rgb01(img_bgr):
-    return img_bgr[..., ::-1].astype(np.float32) / 255.0
+# 영상 신호 → 선형 광량(BT.1886 감마 2.4, ITU-R BT.1702-3 Table 1). 줄무늬 패턴 전용 —
+# 휘도·적색 판정은 fpaCore 수식대로 sRGB(`fpa_channels_cd`)를 쓴다.
+_GAMMA_LUT = np.power(np.arange(256, dtype=np.float32) / np.float32(255.0), DISPLAY_GAMMA).astype(np.float32).reshape(256, 1)
 
 
-def linearize_video(c):
-    """영상 신호 → 선형 광량(BT.1886 감마 2.4, ITU-R BT.1702-3 Table 1). 줄무늬 패턴 전용 —
-    휘도·적색 판정은 fpaCore 수식대로 sRGB(`fpa_channels_cd`)를 쓴다."""
-    return np.power(c, DISPLAY_GAMMA)
-
-
-def luminance_cd(rgb_lin):
-    """선형 RGB → 절대 휘도(cd/m²). Y_rel × DISPLAY_PEAK_CD"""
-    Y = 0.2126 * rgb_lin[..., 0] + 0.7152 * rgb_lin[..., 1] + 0.0722 * rgb_lin[..., 2]
+def luminance_cd(frame_bgr):
+    """BGR 프레임 → 절대 휘도(cd/m²) = Rec.709 상대휘도 × DISPLAY_PEAK_CD (감마 2.4 표)."""
+    lin = cv2.LUT(frame_bgr, _GAMMA_LUT)
+    Y = 0.2126 * lin[..., 2] + 0.7152 * lin[..., 1] + 0.0722 * lin[..., 0]
     return Y * DISPLAY_PEAK_CD
 
 
@@ -440,7 +441,6 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         if max_frames > 0 and processed >= max_frames:
             break
 
-        L_cd = luminance_cd(linearize_video(bgr_to_rgb01(frame)))   # 줄무늬 패턴용
         t = processed / effective_fps
 
         lum, red = engine.update(frame)
@@ -453,12 +453,13 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         # ── 공간 패턴(줄무늬) ──
         pattern_hit = False
         if enable_pattern:
+            L_cd = luminance_cd(frame)
             moving = prev_L_cd is not None and float(np.abs(L_cd - prev_L_cd).mean()) >= FLASH_DELTA_CD * 0.1
             pattern_hit, _ = detect_stripe_pattern(L_cd, moving)
+            prev_L_cd = L_cd
 
         times.append(t)
         pattern_flags.append(pattern_hit)
-        prev_L_cd = L_cd
         processed += 1
 
         if on_frame is not None:
