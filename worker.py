@@ -16,7 +16,7 @@ class AnalysisWorker(QThread):
 
     Signals:
         progress(int, int): (현재 프레임 인덱스, 전체 프레임 수)
-        frame_result(list): 프레임 분석 결과 딕셔너리 묶음 (0.25초마다)
+        frame_result(list): 프레임 분석 결과 딕셔너리 묶음 (0.1초마다)
         finished(dict): 최종 summary 딕셔너리
         error(str): 에러 메시지
     """
@@ -51,10 +51,11 @@ class AnalysisWorker(QThread):
 
     def _on_frame(self, data):
         # 프레임마다 시그널을 보내면 스레드 간 전환 비용이 분석보다 커서(90초 영상: 엔진 28초 / GUI 178초)
-        # 0.25초 분량씩 묶어 보낸다 (0.1초는 그래프 갱신 비용으로 29.7초 → 37.8초).
+        # 0.1초 분량씩 묶어 보낸다. 그래프를 다시 그리는 동안 분석 스레드도 멈춰서(GIL) 간격이 짧을수록
+        # 느려지지만(0.25초 30초 / 0.1초 38초), 0.25초는 그래프가 뚝뚝 끊겨 보였다.
         self._batch.append(data)
         now = time.monotonic()
-        if now - self._last_emit >= 0.25:
+        if now - self._last_emit >= 0.1:
             self._flush()
             self._last_emit = now
 

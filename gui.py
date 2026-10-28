@@ -293,7 +293,9 @@ class PEATMainWindow(QMainWindow):
         chart_inner = QVBoxLayout(chart_frame)
         chart_inner.setContentsMargins(8, 8, 8, 8)
 
-        pg.setConfigOptions(antialias=True, useOpenGL=False)
+        # segmentedLineMode: 굵은 점선을 선분 단위로 그림. 한 덩어리 경로로 그리면 깜빡임이 많은 긴 영상
+        # (12분)에서 전체 보기 다시 그리기가 2.7초 걸려 확대·축소가 버벅였다 (선분 단위 0.1초).
+        pg.setConfigOptions(antialias=True, useOpenGL=False, segmentedLineMode="on")
         self.plot_widget = pg.PlotWidget(axisItems={"bottom": TimeAxisItem(orientation="bottom")})
         self.plot_widget.setBackground("#c9ccd0")
         self.plot_widget.showGrid(x=True, y=False, alpha=0.3)
@@ -596,7 +598,7 @@ class PEATMainWindow(QMainWindow):
         self.curve_red_diag.setData(t, count_to_chart_y(red_raw))
 
     def _on_frame_result(self, batch):
-        """워커가 0.25초마다 묶어 보낸 프레임 결과를 쌓고 그래프를 한 번 갱신."""
+        """워커가 0.1초마다 묶어 보낸 프레임 결과를 쌓고 그래프를 한 번 갱신."""
         for data in batch:
             self.times.append(data["time"])
             self.lum_window_counts.append(data["lum_window_count"])
