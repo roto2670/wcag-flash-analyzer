@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QProgressBar, QGroupBox,
     QSpinBox, QDoubleSpinBox, QCheckBox, QStatusBar, QFrame,
-    QLineEdit, QComboBox,
+    QLineEdit,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QColor
@@ -271,13 +271,6 @@ class PEATMainWindow(QMainWindow):
         self.chk_pattern = QCheckBox("줄무늬 패턴 분석")
         self.chk_pattern.setChecked(True)
         opt_row.addWidget(self.chk_pattern)
-
-        opt_row.addWidget(QLabel("엔진:"))
-        self.combo_engine = QComboBox()
-        self.combo_engine.addItem("fpaCore 수식", "fpacore")
-        self.combo_engine.addItem("참조 코드 (ex)", "ex")
-        self.combo_engine.setToolTip("fpaCore 수식: engine.py (기본)\n참조 코드: flash_analyzer_ex.py 기반 — 몇 배 느림")
-        opt_row.addWidget(self.combo_engine)
 
         opt_row.addStretch()
 
@@ -550,7 +543,6 @@ class PEATMainWindow(QMainWindow):
             video_path=self.video_path,
             downsample=self.spin_downsample.value(),
             enable_pattern=self.chk_pattern.isChecked(),
-            engine=self.combo_engine.currentData(),
         )
         self.worker.progress.connect(self._on_progress)
         self.worker.frame_result.connect(self._on_frame_result)

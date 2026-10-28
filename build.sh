@@ -63,7 +63,6 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
         --include-module=numpy \
         --include-module=pyqtgraph \
         --include-module=engine \
-        --include-module=engine_ex --include-module=flash_analyzer_ex \
         --include-module=worker \
         --noinclude-custom-mode=yt_dlp:bytecode \
         --macos-create-app-bundle \
@@ -86,7 +85,6 @@ elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "win32" ]] || [[ "$OSTYPE" == 
         --include-module=numpy \
         --include-module=pyqtgraph \
         --include-module=engine \
-        --include-module=engine_ex --include-module=flash_analyzer_ex \
         --include-module=worker \
         --noinclude-custom-mode=yt_dlp:bytecode \
         --windows-console-mode=disable \
@@ -108,7 +106,6 @@ else
         --include-module=numpy \
         --include-module=pyqtgraph \
         --include-module=engine \
-        --include-module=engine_ex --include-module=flash_analyzer_ex \
         --include-module=worker \
         --noinclude-custom-mode=yt_dlp:bytecode \
         --output-filename=PEAT_Analyzer \
