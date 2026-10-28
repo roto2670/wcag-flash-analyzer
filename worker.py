@@ -1,12 +1,12 @@
 """
 worker.py — QThread 기반 PEAT 분석 워커 (얇은 래퍼).
-분석 루프는 peat.analyze_video 단일 소스이며, 여기서는 콜백으로 구동해
+분석 루프는 engine.analyze_video 단일 소스이며, 여기서는 콜백으로 구동해
 시그널(progress/frame_result/finished/error)로 GUI에 전달만 한다.
 """
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
-from peat import AREA_THRESHOLD, WINDOW_SECONDS, analyze_video
+from engine import AREA_THRESHOLD, WINDOW_SECONDS, analyze_video
 
 
 class AnalysisWorker(QThread):
@@ -26,7 +26,7 @@ class AnalysisWorker(QThread):
 
     def __init__(self, video_path, area_threshold=AREA_THRESHOLD,
                  window_seconds=WINDOW_SECONDS, downsample=1,
-                 max_frames=0, enable_pattern=True, emit_every=1):
+                 max_frames=0, enable_pattern=True, emit_every=1, engine="fpacore"):
         super().__init__()
         self.video_path = video_path
         self.area_threshold = area_threshold
@@ -35,6 +35,7 @@ class AnalysisWorker(QThread):
         self.max_frames = max_frames
         self.enable_pattern = enable_pattern
         self.emit_every = emit_every  # N프레임마다 시그널 전송
+        self.engine = engine
         self._stop_flag = False
 
     def stop(self):
@@ -61,6 +62,7 @@ class AnalysisWorker(QThread):
             enable_pattern=self.enable_pattern,
             on_frame=self._on_frame,
             should_stop=lambda: self._stop_flag,
+            engine=self.engine,
         )
         if metrics is None:  # 사용자 중단
             return

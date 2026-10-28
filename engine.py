@@ -1,20 +1,13 @@
 """
-peat.py — Harding/ITU-R BT.1702-3 기반 광과민성 발작 분석 엔진 (PEAT 충실 재구현)
+engine.py — 광과민성 발작 분석 엔진 (PEAT fpaCore 수식 재구현)
 
-공식 PEAT 분석 코어는 Cambridge Research Systems의 Harding FPA 엔진을 라이선스한
-독점 모듈이라 코드 복제가 불가능하다. 이 파일은 PEAT가 실제로 따르는 표준
-(WCAG 2.3.1 + ITU-R BT.1702-3 + Harding/Wilkins 패턴 기준)을 직접 구현한 것이다.
-
-핵심 구현:
-  1. cd/m² 절대 휘도 기준: ≥20 cd/m² 변화(어두운쪽 <160), 그 이상은 Michelson >1/17
-  2. 적색 플래시: WCAG 작업정의 — 포화적색 R/(R+G+B)≥0.8 + (R−G−B)×320 변화 >20
-  3. 줄무늬(공간) 패턴 분석 추가
-  4. 페이싱 면제(앞뒤 간격이 모두 ≥334ms/60Hz·≥360ms/50Hz인 '고립' 전환만)
+PEAT 분석 코어(fpaCore.dll v1.19)의 디스어셈블리에서 읽은 수식("깜빡임 계산식 수학 정리.md")을
+정수 연산까지 그대로 옮긴 휘도·적색 깜빡임 엔진. 줄무늬 패턴은 PEAT에서 비활성이라
+Harding/Wilkins 기준으로 따로 구현했다. 이전 엔진(FPA 출력 역산)은 legacy.py에 보관.
 
 출처:
   - WCAG 2.3.1: https://www.w3.org/WAI/WCAG21/Understanding/three-flashes-or-below-threshold.html
   - ITU-R BT.1702-3: https://www.itu.int/dms_pubrec/itu-r/rec/bt/R-REC-BT.1702-3-202311-I!!PDF-E.pdf
-  - PEAT 오픈 클론(참조): https://github.com/rakeeb-hossain/PEAT_V2
 """
 
 import argparse
@@ -41,95 +34,12 @@ DISPLAY_PEAK_CD = 200.0       # 패턴 cd/m² 환산: SDR 백색 200 cd/m² 가�
 DISPLAY_GAMMA = 2.4           # 패턴 cd/m² 환산: BT.1886 디스플레이 감마 (ITU-R BT.1702-3 Table 1)
 FLASH_DELTA_CD = 20.0         # 패턴 광-암 차 하한 (cd/m²)
 
-# ──────────────────────────────────────────────────────────────────────────
-# 휘도 플래시: PEAT식 픽셀 엔진
-# ──────────────────────────────────────────────────────────────────────────
-# 공식 PEAT 결과 파일(.fpa)을 합성 테스트 영상 63개(면적·밝기·횟수·이동·해상도를 하나씩
-# 바꾼 288×216 AVI)와 실제 QA 영상 7개로 역산해 맞춘 규칙 (2026-10-27).
-#  - 밝기: sRGB 선형화 + Rec.709 상대휘도 Y(0~1). 감마 2.4는 0↔96 점멸(PEAT FAIL)을 19cd로
-#    환산해 놓쳤고, PEAT 위험도 세기도 sRGB ΔY에 1차식으로 정확히 맞음(최대오차 0.3%).
-#    플래시 기준 ΔY≈0.095(0↔86 안 셈, 88 셈), 전환 수 기준 ΔY≈0.048(60 안 셈, 64 셈),
-#    어두운 쪽 Y≥0.8이면 면제(230↔255 FAIL, 235↔255 면제 — WCAG 규정 그대로).
-#  - 전환 수(진단 실선, PEAT 보고서 휘도 횟수) = 10° 박스(화면 1/3×1/3)에서 '최근 1초 전환
-#    ≥k' 픽셀 면적이 25%를 '초과'하는 최대 k (정확히 25% 패치는 0회).
-#  - 움직임 허용: 지금 값이 직전 프레임 이웃(십자 ±r) 값 범위 안이고 그 반대도 성립하면
-#    이동으로 보고 전환으로 세지 않는다(극값은 현재값으로 흡수). 이동 줄무늬 실험에서 288폭
-#    기준 프레임당 7px 이하는 무시·9px 이상은 FAIL, 해상도에 비례(576폭에서 2배). 경계가
-#    부드러운 사인 줄무늬는 같은 이동에도 FAIL이라 블록 추적이 아니라 '주변 값 존재' 방식.
-#    정확한 이웃 표본 모양은 합성으로 구분 불가 — 실제 7개 FPA에서 십자 r=5가 누락 0·과민 최소.
-#  - FAIL = 전환 수 ≥7 AND 최근 7프레임(0.23초) 안에 플래시 기준 전환한 픽셀 면적 >10%.
-#    깜빡임이 멈추면 1초 창 카운트가 남아 있어도 0.23초 뒤 FAIL이 끝난다(PEAT와 동일).
-#  - 위험도(점선, PEAT 보고서 Lum 0.0~3.4, ≥0.5 FAIL): 합성 실측 0.46×(A/0.25)^3.07,
-#    A = 최근 플래시 픽셀 중 1초 전환 ≥k인 면적. 7회 미만이면 CAUTION(5회 0.3, 6회 0.4) 상한.
-PEAT_WIDTH = 288          # PEAT 분석 기준 폭 — 입력은 이 폭으로 축소(인코딩 공간)
-PEAT_COUNT_DY = 0.048     # 전환으로 세는 최소 상대휘도 변화
-PEAT_FLASH_DY = 0.095     # 플래시(위험도) 기준 상대휘도 변화 ≈ 20cd
-PEAT_DARK_Y = 0.8         # 어두운 쪽이 이 이상이면 플래시 아님
-PEAT_MOTION_R = 5         # 움직임 허용 십자 이웃 반경(PEAT_WIDTH 기준 px)
-PEAT_RECENT_S = 7 / 30.0  # FAIL 유지에 필요한 최근 플래시 시간창
-PEAT_RECENT_AREA = 0.10   # 최근 플래시 픽셀의 10° 박스 면적 하한
-# 적색(합성 테스트 8차): WCAG 적색값 (R−G−B)×320을 sRGB 선형값으로 계산(감마 2.4는 r75·80 FAIL을 놓침).
-#   플래시 기준 20(r70=19.6 안 셈, r75=22.5 셈), 전환 수 기준은 더 낮음(r60=14.5도 셈),
-#   포화 적색 R/(R+G+B) 경계는 0.8이 아니라 약 0.816(합성 9차: (255,94,94)=0.8171 셈,
-#   (255,95,95)=0.8145 안 셈; 초록·파랑만 섞어도 같은 비율에서 같은 결과 → 공식 R/(R+G+B) 확인).
-#   위험 세기 = 1.8×적색값 변화+229 (혼합색 포함 오차 1% 안), 면적 25% 초과·FAIL 종료는 휘도와 같음.
-PEAT_RED_FLASH = 20.0
-PEAT_RED_COUNT = 10.0
-PEAT_RED_SAT = 0.816
-RISK_FAIL = 0.5           # PEAT 위험도 합격선
+RISK_FAIL = 0.5           # PEAT 위험도 합격선 (점수 0.5 이상 FAIL)
 RISK_MAX = 3.4            # PEAT 위험도 천장
-# 휘도(2026-10-28, FPA 13개 프레임 대조로 맞춤 — 전환 수 일치 72.8%→89.2%, ±1 이내 99.3%):
-#  - 휘도 = 채널별 sRGB 선형값×200을 정수 cd/m²로 반올림 → Rec.709 고정소수점 가중합(>>16).
-#  - 블록(36px) 히스토그램(0~200 cd/m² 61칸) 차이 L1 > 0.36×블록 픽셀 수인 블록만 '실제 밝기
-#    변화'로 보고, 나머지는 움직임으로 보아 전환을 세지 않는다. 물체가 움직여도 블록 밝기 분포는
-#    거의 그대로라 이 구분이 이동 허용 규칙(±5px 이웃)보다 PEAT에 가깝다. 픽셀을 옮겨 맞추는
-#    이동 보정이나 '옮긴 블록' 히스토그램 비교는 오히려 PEAT와 멀어졌다.
-#  - 전환 = 같은 위치 직전 프레임 대비 ±7 cd/m² 초과 + 방향 교대(기대 방향), 1초 창 전환이
-#    0이 되면 기대 방향 초기화. 면적은 화면 0.4×0.4 박스(1/3 박스보다 FAIL 경계가 PEAT에 가까움).
-PEAT_PEAK_CD = 200.0
-PEAT_HIST_BLOCK = 36      # PEAT_WIDTH 기준 블록 크기(px)
-PEAT_HIST_BINS = 61
-PEAT_HIST_THR = 0.36
-PEAT_LUM_COUNT_CD = 7.0   # 전환 수용 변화 기준
-PEAT_LUM_FLASH_CD = PEAT_FLASH_DY * PEAT_PEAK_CD   # 플래시(FAIL·위험도)용 변화 기준
-PEAT_DARK_CD = PEAT_DARK_Y * PEAT_PEAK_CD          # 어두운 쪽이 이 이상이면 플래시 아님
-PEAT_LUM_BOX = 0.4        # 휘도 면적 박스(화면 비율)
 
 _SRGB_LUT = np.arange(256, dtype=np.float32) / 255.0
 _SRGB_LUT = np.where(_SRGB_LUT <= 0.04045, _SRGB_LUT / 12.92,
                      np.power((_SRGB_LUT + 0.055) / 1.055, 2.4)).astype(np.float32)
-
-
-def peat_rgb(frame_bgr, resize=True):
-    """BGR 프레임 → PEAT 기준 폭(resize=False면 원본 크기)의 sRGB 선형 BGR(0~1)."""
-    H, W = frame_bgr.shape[:2]
-    if resize and W != PEAT_WIDTH:
-        frame_bgr = cv2.resize(frame_bgr, (PEAT_WIDTH, max(3, int(round(H * PEAT_WIDTH / W)))),
-                               interpolation=cv2.INTER_AREA)
-    return _SRGB_LUT[frame_bgr]
-
-
-def peat_luma(frame_bgr, resize=True):
-    """BGR 프레임 → sRGB 상대휘도 Y(0~1)."""
-    lin = peat_rgb(frame_bgr, resize)
-    return 0.0722 * lin[..., 0] + 0.7152 * lin[..., 1] + 0.2126 * lin[..., 2]
-
-
-def peat_flash_mask(frame_bgr, prev_bgr):
-    """두 프레임 사이 PEAT 플래시 기준(ΔY≥0.095, 어두운 쪽 <0.8)을 넘는 픽셀 — 미리보기 강조용."""
-    a, b = peat_luma(frame_bgr, resize=False), peat_luma(prev_bgr, resize=False)
-    return (np.abs(a - b) >= PEAT_FLASH_DY) & (np.minimum(a, b) < PEAT_DARK_Y)
-
-
-def peat_red_mask(frame_bgr, prev_bgr):
-    """두 프레임 사이 PEAT 적색 플래시 기준(포화 적색 + 적색값 변화 ≥20)을 넘는 픽셀 — 미리보기 강조용."""
-    out = []
-    for f in (frame_bgr, prev_bgr):
-        lin = peat_rgb(f, resize=False)
-        B, G, R = lin[..., 0], lin[..., 1], lin[..., 2]
-        out.append((np.maximum(R - G - B, 0.0) * 320.0, R >= PEAT_RED_SAT * (R + G + B + 1e-6)))
-    (va, sa), (vb, sb) = out
-    return (np.abs(va - vb) >= PEAT_RED_FLASH) & (sa | sb)
 
 
 def _box_area_map(mask, frac=None):
@@ -143,107 +53,6 @@ def _box_area_map(mask, frac=None):
     loc = cv2.boxFilter(mask.astype(np.float32), -1, (kw, kh), normalize=True)
     y0, x0 = kh // 2, kw // 2
     return loc[y0:y0 + H - kh + 1, x0:x0 + W - kw + 1]
-
-
-def _risk_from_area(area):
-    """플래시 면적(10° 박스 비율) → PEAT 위험도. 합성 실측(25.7%→0.5, 30%→0.8, 40%→1.9)."""
-    return min(RISK_MAX, 0.459 * (area / AREA_THRESHOLD) ** 3.07) if area > 0 else 0.0
-
-
-class _PixelExtremes:
-    """픽셀별 극값·방향 추적과 최근 1초 전환 이력.
-    sat를 주면(적색) 지금 또는 극값 상태가 포화 적색인 픽셀만 전환으로 센다."""
-
-    def __init__(self, shape, thr, window_frames, dark=None):
-        self.thr, self.dark, self.wf = thr, dark, window_frames
-        self.ext = None
-        self.sat_ext = None
-        self.dr = np.zeros(shape, np.int8)
-        self.hist = np.zeros((window_frames,) + shape, bool)
-        self.age = np.full(shape, 9999, np.int32)   # 마지막 전환 후 지난 프레임 수
-        self.i = 0
-
-    def step(self, Y, explained, sat=None):
-        if self.ext is None:
-            self.ext = Y.copy()
-            self.sat_ext = sat
-            return
-        d = Y - self.ext
-        sg = np.sign(d).astype(np.int8)
-        big = np.abs(d) >= self.thr
-        if self.dark is not None:
-            big &= np.minimum(Y, self.ext) < self.dark
-        if sat is not None:
-            big &= sat | self.sat_ext
-        tr = big & (sg != 0) & (sg != self.dr) & ~explained
-        self.ext = np.where(explained, Y, self.ext)          # 이동으로 설명된 변화는 흡수
-        self.ext = np.where(tr, Y, self.ext)
-        self.dr = np.where(tr, sg, self.dr)
-        grow = (~tr) & (((self.dr > 0) & (Y > self.ext)) | ((self.dr < 0) & (Y < self.ext)))
-        self.ext = np.where(grow, Y, self.ext)
-        self.ext = np.where((self.dr == 0) & ~big, Y, self.ext)
-        if sat is not None:                                  # 극값이 바뀐 픽셀은 포화 상태도 갱신
-            self.sat_ext = np.where(self.ext == Y, sat, self.sat_ext)
-        self.age = np.where(tr, 0, np.minimum(self.age + 1, 9999))
-        self.hist[self.i % self.wf] = tr
-        self.i += 1
-
-    def counts(self):
-        return self.hist.sum(axis=0)
-
-
-class _PeatChannel:
-    """한 채널(휘도 Y 또는 적색값)의 전환 수·FAIL·위험도. 전환 수용/플래시용 추적기 2개."""
-
-    def __init__(self, window_frames, recent, count_thr, flash_thr, dark=None, area_thr=AREA_THRESHOLD):
-        self.wf, self.recent, self.area_thr = window_frames, recent, area_thr
-        self.count_thr, self.flash_thr, self.dark = count_thr, flash_thr, dark
-        self.tc = self.tf = None
-
-    def update(self, V, explained, sat=None):
-        if self.tc is None:
-            self.tc = _PixelExtremes(V.shape, self.count_thr, self.wf)
-            self.tf = _PixelExtremes(V.shape, self.flash_thr, self.wf, self.dark)
-        self.tc.step(V, explained, sat)
-        self.tf.step(V, explained, sat)
-        C = self.tc.counts()
-        count = 0
-        for k in range(1, int(C.max()) + 1):
-            if _box_area_map(C >= k).max() > self.area_thr + 1e-6:
-                count = k
-            else:
-                break
-        recent = self.tf.age <= self.recent
-        recent_area = float(_box_area_map(recent).max()) if recent.any() else 0.0
-        fail = count >= FAIL_TRANSITIONS and recent_area > PEAT_RECENT_AREA
-        risk = 0.0
-        if count >= FAIL_TRANSITIONS - 2 and recent.any():
-            level = min(count, FAIL_TRANSITIONS)
-            risk = _risk_from_area(float(_box_area_map(recent & (C >= level)).max()))
-            if not fail:
-                risk = min(risk, 0.4 if count >= FAIL_TRANSITIONS - 1 else 0.3)
-        return {"count": count, "fail": fail, "risk": risk, "area": recent_area}
-
-
-def _risk_from_a7(a7):
-    """1초 전환 ≥7 픽셀 면적(박스 비율) → FAIL 중 PEAT 휘도 위험도 (FPA 13개 맞춤)."""
-    return float(np.clip(0.65 + 8.75 * max(a7 - AREA_THRESHOLD, 0.0) ** 1.2, RISK_FAIL, RISK_MAX))
-
-
-def peat_lum_cd(frame_bgr):
-    """BGR 프레임 → PEAT 기준 폭의 정수 휘도(cd/m², float32 배열)."""
-    lin = np.rint(peat_rgb(frame_bgr) * PEAT_PEAK_CD).astype(np.int64)
-    return ((13933 * lin[..., 2] + 46871 * lin[..., 1] + 4732 * lin[..., 0]) >> 16).astype(np.float32)
-
-
-def _block_hist(L, b, bins):
-    """블록(b×b)별 휘도 히스토그램 (by, bx, bins). 0~PEAT_PEAK_CD를 bins칸으로."""
-    H, W = L.shape
-    by, bx = H // b, W // b
-    q = np.clip(np.rint(L[:by * b, :bx * b] / PEAT_PEAK_CD * (bins - 1)), 0, bins - 1).astype(np.int32)
-    blk = q.reshape(by, b, bx, b).transpose(0, 2, 1, 3).reshape(by * bx, b * b)
-    idx = blk + (np.arange(by * bx) * bins)[:, None]
-    return np.bincount(idx.ravel(), minlength=by * bx * bins).reshape(by, bx, bins)
 
 
 class _FrameDiffTransitions:
@@ -273,80 +82,242 @@ class _FrameDiffTransitions:
         return self.hist.sum(axis=0)
 
 
-class _HistLumChannel:
-    """휘도 채널: 블록 히스토그램 플래그 + 프레임차 전환. 반환 dict는 _PeatChannel과 같다."""
+# ──────────────────────────────────────────────────────────────────────────
+# fpaCore 역어셈블 엔진 ("깜빡임 계산식 수학 정리.md", 2026-10-27 @wade)
+# ──────────────────────────────────────────────────────────────────────────
+# fpaCore.dll v1.19 디스어셈블리에서 읽은 식을 정수 연산까지 그대로 옮긴 것. 절 번호는 문서 기준.
+#  - 축소(선형 휘도 면적 평균 → 8비트 재양자화), 휘도 = 채널별 정수 cd의 Rec.709 고정소수점 합.
+#  - 블록(폭/8) 히스토그램 플래그 + ±6 cd 방향 교대 전환, 1초 창 전환 >6 & 9프레임 최소 <160 = 위험 픽셀.
+#  - 위험 픽셀마다 9프레임 월시 대역 에너지 E → 강도 x → 면적별 포물선 f → 점수 round(f)/10.
+#  - 패턴 판정은 원본에서 비활성(항상 0), 인터레이스(필드) 모드는 미구현.
+# 문서와 다른 점 하나: 문서는 프레임을 96×72로 축소한다고 했지만, 그렇게 하면 FPA 13개에서
+# PEAT FAIL 31구간 중 10개만 잡혔다(wuwa: PEAT 위험도 3.4인 장면의 위험 면적이 화면의 20%뿐).
+# 기존 FPA 역산(10° 박스 = 288×216의 정확히 1/3 = 96×72)과 6.6절 '판정 창을 옮겨 가며'에 맞춰
+# 288폭으로 분석하고 96×72를 판정 창으로 쓴다. 문서 그대로는 FPA_ANALYSIS_W = 96.
+FPA_ANALYSIS_W = 288              # 분석 폭 (블록 한 변 b = 폭/8)
+FPA_WIN_W, FPA_WIN_H = 96, 72     # 판정 창 W
+FPA_HIST_LUM = 0.36               # 블록 플래그 기준 × b²
+FPA_HIST_RED = 0.44
+FPA_TRANS_CD = 6                  # 전환 문턱 (cd/m², 고정)
+FPA_COUNT_GT = 6                  # 위험 픽셀: 1초 전환 > 6 (설정값)
+FPA_DARK_CD = 160                 # 위험 픽셀: 최근 9프레임 최소 휘도 < 160
+FPA_HIST_FRAMES = 9
+FPA_SWING_CD = 20                 # 9프레임 변동폭 문턱 (설정값)
+FPA_AREA_PCT = 25.0               # 면적 곡선 경계 (설정값)
+FPA_RED_SAT_PCT = 80              # 포화 적색 비율 (설정 +0x20)
+# 강도 x의 ROI 넓이: 문서는 |ROI|(판정 창 96×72)지만 FPA의 u16@4 = 10·x 대조로 192×144(창 넓이 ×4)임을
+# 확인(wuwa 5.53초 w2=172 ↔ 창 넓이로 나눈 x 68.9). 창 넓이로 나누면 작은 면적 곡선이 상한 0.4에 붙었다.
+FPA_X_ROI = 192 * 144
+FPA_X_LUM = 1.5 * 64 / 9 * 25344 / 1e6 / FPA_X_ROI
+FPA_X_RED = 64 / 9 * 25344 / 1e6 / FPA_X_ROI
+_FPA_TAPS = np.array([2, 3, 4, 5, 6, 7, 6, 5], np.int64)
+_FPA_WALSH = np.array([          # W1..W11 (6.3절 표), 행 = 계수, 열 = a1..a8
+    [+1, +1, +1, +1, -1, -1, -1, -1],
+    [+1, +1, -1, -1, -1, -1, +1, +1],
+    [+1, +1, -1, -1, +1, +1, -1, -1],
+    [+1, -1, -1, +1, +1, -1, -1, +1],
+    [+1, -1, -1, +1, -1, +1, +1, -1],
+    [+1, -1, +1, -1, -1, +1, -1, +1],
+    [+1, -1, +1, -1, +1, -1, +1, -1],
+    [+1, +1, +1, -1, -1, -1, -1, +1],
+    [+1, -1, -1, -1, -1, +1, +1, +1],
+    [-1, -1, +1, -1, +1, +1, -1, +1],
+    [-1, +1, -1, -1, +1, -1, +1, +1],
+], np.int64)
+_FPA_CD = np.rint(_SRGB_LUT.astype(np.float64) * 200.0).astype(np.int64)    # L(p), 짝수 반올림
+_v = np.arange(201, dtype=np.float64) / 200.0
+_FPA_INV = np.rint(255.0 * np.where(_v <= 0.0031308, 12.92 * _v,
+                                    1.055 * np.power(_v, 1 / 2.4) - 0.055)).astype(np.int64)   # L⁻¹(cd)
+del _v
 
-    def __init__(self, window_frames, recent, area_thr=AREA_THRESHOLD):
-        self.wf, self.recent, self.area_thr = window_frames, recent, area_thr
-        self.prev = None
 
-    def update(self, L):
-        b = PEAT_HIST_BLOCK
-        H, W = L.shape
-        by, bx = H // b, W // b
-        if self.prev is None:
-            self.tc = _FrameDiffTransitions(L.shape, PEAT_LUM_COUNT_CD, self.wf)
-            self.tf = _FrameDiffTransitions(L.shape, PEAT_LUM_FLASH_CD, self.wf, PEAT_DARK_CD)
-            flag, P = np.zeros(L.shape, bool), L
-        else:
-            D = np.abs(_block_hist(L, b, PEAT_HIST_BINS) - _block_hist(self.prev, b, PEAT_HIST_BINS)).sum(-1)
-            flag = np.zeros(L.shape, bool)
-            flag[:by * b, :bx * b] = np.repeat(np.repeat(D > round(PEAT_HIST_THR * b * b), b, 0), b, 1)
-            P = self.prev
-        self.tc.step(L, P, flag)
-        self.tf.step(L, P, flag)
-        self.prev = L
+def _trunc_div(a, b):
+    """C 정수 나눗셈(0 쪽 버림)."""
+    return np.trunc(a / b).astype(np.int64)
 
-        C = self.tc.counts()
-        count = 0
-        for k in range(1, int(C.max()) + 1):
-            if _box_area_map(C >= k, PEAT_LUM_BOX).max() > self.area_thr + 1e-6:
+
+def fpa_channels_cd(frame_bgr, width=FPA_ANALYSIS_W):
+    """BGR 프레임 → 분석 폭의 채널별 정수 cd (L(R), L(G), L(B)). 1절의 이중 양자화 축소."""
+    H, W = frame_bgr.shape[:2]
+    size = (width, max(3, int(round(H * width / W))))
+    out = []
+    for c in (2, 1, 0):
+        L = _FPA_CD[frame_bgr[..., c]].astype(np.float32)
+        avg = cv2.resize(L, size, interpolation=cv2.INTER_AREA)
+        p = _FPA_INV[np.clip(np.rint(avg), 0, 200).astype(np.int64)]
+        out.append(_FPA_CD[p])
+    return out
+
+
+def _fpa_block_flag(V, Vp, thr_frac):
+    """3절: 블록별 10 cd 간격 61칸 히스토그램 L1 차 > round(thr_frac·b²)인 블록의 픽셀 마스크."""
+    H, W = V.shape
+    b = W // 8
+    by, bx = H // b, W // b
+
+    def hist(S):
+        q = np.clip(S[:by * b, :bx * b] // 10, 0, 60)
+        blk = q.reshape(by, b, bx, b).transpose(0, 2, 1, 3).reshape(by * bx, b * b)
+        idx = blk + (np.arange(by * bx) * 61)[:, None]
+        return np.bincount(idx.ravel(), minlength=by * bx * 61).reshape(by, bx, 61)
+
+    D = np.abs(hist(V) - hist(Vp)).sum(-1)
+    flag = np.zeros(V.shape, bool)
+    flag[:by * b, :bx * b] = np.repeat(np.repeat(D > round(thr_frac * b * b), b, 0), b, 1)
+    return flag
+
+
+def _fpa_energy(hist9, mask):
+    """6.1~6.5절: 9프레임 이력(9, H, W; 오래된 것부터)으로 픽셀 에너지 E. mask 밖은 0."""
+    h = hist9[:, mask].astype(np.int64)                  # (9, n)
+    E = np.zeros(mask.shape, np.int64)
+    if h.shape[1] == 0:
+        return E
+    m = h.sum(0) // 9
+    d = h - m
+    ok = (d.max(0) - d.min(0)) >= FPA_SWING_CD
+    a = _trunc_div(_FPA_TAPS[:, None] * d[1:] + 4, 8)  # (8, n) — h1 버림
+    Wc = _FPA_WALSH @ a                                  # (11, n)
+    A = np.abs(Wc)
+    B = np.stack([
+        _trunc_div(A[0] + A[1] + A[7] + A[8] + 4, 8),
+        (A[2] + np.abs(Wc[3] + 2)) // 4,
+        _trunc_div(A[4] + A[5] + A[9] + A[10] + 4, 8),
+        np.abs(_trunc_div(Wc[6], 2)),
+    ])
+    band = np.arange(1, 5)[:, None]
+    e = ((B >= 1) * band * (B + 50)).sum(0)
+    E[mask] = np.where(ok, e, 0)
+    return E
+
+
+def fpa_risk_curve(x, a_pct, area_pct=FPA_AREA_PCT):
+    """7절: 면적별 위험도 f (음수는 0). area_pct~2·area_pct 구간은 보간. 배열 입력 가능."""
+    xs, xl = np.minimum(x, 8.3), np.minimum(x, 23.0)
+    fS = ((23 - xs) * xs - 60) / 14
+    fL = ((46 - xl) * xl - 120) / 12
+    t = np.clip((np.asarray(a_pct, np.float64) - area_pct) / area_pct, 0.0, 1.0)
+    return np.maximum(0.0, t * fL + (1 - t) * fS)
+
+
+def _window_sums(M, kh, kw):
+    """판정 창(kh×kw)이 화면 안에 완전히 들어가는 위치별 합 (정수 적분 영상)."""
+    I = np.pad(M.astype(np.int64).cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+    return I[kh:, kw:] - I[:-kh, kw:] - I[kh:, :-kw] + I[:-kh, :-kw]
+
+
+class _FpaChannel:
+    """휘도 또는 적색 한 채널. update(전환 신호, 직전 신호, 블록 플래그, 9프레임용 신호, 에너지 조건)."""
+
+    def __init__(self, window_frames, x_coef, area_pct=FPA_AREA_PCT):
+        self.wf, self.x_coef, self.area_pct = window_frames, x_coef, area_pct
+        self.tr = None
+        self.hist9 = []
+
+    def push(self, H9):
+        """9프레임 이력에만 추가 (전환 판정 없이)."""
+        self.hist9.append(H9)
+        if len(self.hist9) > FPA_HIST_FRAMES:
+            self.hist9.pop(0)
+
+    def update(self, V, P, flag, H9, sig9_ok=None):
+        if self.tr is None:
+            self.tr = _FrameDiffTransitions(V.shape, FPA_TRANS_CD, self.wf)
+        self.tr.step(V, P, flag)
+        self.push(H9)
+        hist9 = np.stack(self.hist9)
+        C = self.tr.counts()
+
+        kh, kw = min(FPA_WIN_H, V.shape[0]), min(FPA_WIN_W, V.shape[1])
+        roi = kh * kw
+        D = (C > FPA_COUNT_GT) & (hist9.min(0) < FPA_DARK_CD)            # 5절
+        nD = _window_sums(D, kh, kw)
+        f, a_pct = 0.0, 100.0 * nD.max() / roi
+        if D.any() and len(self.hist9) == FPA_HIST_FRAMES:
+            mask = D if sig9_ok is None else D & sig9_ok
+            S = _window_sums(_fpa_energy(hist9, mask), kh, kw)            # 6.6절
+            fW = fpa_risk_curve(self.x_coef * S, 100.0 * nD / roi, self.area_pct)
+            best = np.flatnonzero(fW == fW.max())                         # 동률이면 위험 픽셀 많은 창
+            best = best[np.argmax(nD.ravel()[best])]
+            f, a_pct = float(fW.ravel()[best]), 100.0 * nD.ravel()[best] / roi
+        r = round(f)                                                      # 8절 (짝수 반올림)
+        count = 0                                                         # 진단선: 창에서 h(k) > 25%인 최대 k
+        for k in range(1, 31):
+            if _window_sums(C >= k, kh, kw).max() > round(roi * self.area_pct / 100):
                 count = k
             else:
                 break
-        recent = self.tf.age < self.recent
-        recent_area = float(_box_area_map(recent, PEAT_LUM_BOX).max()) if recent.any() else 0.0
-        fail = count >= FAIL_TRANSITIONS and recent_area > PEAT_RECENT_AREA
-        risk = 0.0
-        if fail:
-            # FAIL 중 위험도 = 1초 전환 ≥7 픽셀 면적의 함수(FPA 564프레임 맞춤, 평균오차 0.33).
-            # '최근 7프레임' 면적은 프레임마다 출렁여 PEAT 점선의 계단·평탄 모양과 달랐다.
-            a7 = float(_box_area_map(C >= FAIL_TRANSITIONS, PEAT_LUM_BOX).max())
-            risk = _risk_from_a7(a7)
-        elif count >= FAIL_TRANSITIONS - 2 and recent.any():
-            level = min(count, FAIL_TRANSITIONS)
-            risk = _risk_from_area(float(_box_area_map(recent & (C >= level), PEAT_LUM_BOX).max()))
-            risk = min(risk, 0.4 if count >= FAIL_TRANSITIONS - 1 else 0.3)
-        return {"count": count, "fail": fail, "risk": risk, "area": recent_area}
+        return {"count": count, "fail": r >= 5, "warn": 1 <= r <= 4, "risk": r / 10.0,
+                "area": a_pct / 100.0}
 
 
-class PeatEngine:
-    """프레임마다 update() → (휘도 dict, 적색 dict), 각 dict(count, fail, risk, area)."""
+_FPA_IDLE = {"count": 0, "fail": False, "warn": False, "risk": 0.0, "area": 0.0}
 
-    def __init__(self, window_frames, fps, area_thr=AREA_THRESHOLD):
-        recent = max(1, int(round(PEAT_RECENT_S * fps)))
-        r = PEAT_MOTION_R
-        self.kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (2 * r + 1, 2 * r + 1))
-        self.lum = _HistLumChannel(window_frames, recent, area_thr)
-        self.red = _PeatChannel(window_frames, recent, PEAT_RED_COUNT, PEAT_RED_FLASH, area_thr=area_thr)
-        self.prev_Y = self.prev_R = None
+
+class FpaCoreEngine:
+    """프레임마다 update(frame) → (휘도 dict, 적색 dict).
+    dict = count(진단 전환 수), fail, warn, risk(점수 R, 0~3.4), area(위험 면적 비율).
+    area_thr: 면적 곡선 경계(설정값, 기본 0.25 = 25%)."""
+
+    def __init__(self, window_frames, area_thr=AREA_THRESHOLD):
+        self.lum = _FpaChannel(window_frames, FPA_X_LUM, 100.0 * area_thr)
+        self.red = _FpaChannel(window_frames, FPA_X_RED, 100.0 * area_thr)
+        self.prev = None
+        self.sat_hist = []
         self.sat = None
-
-    def _explained(self, V, P):
-        k = self.kernel
-        return ((V >= cv2.erode(P, k)) & (V <= cv2.dilate(P, k))
-                & (P >= cv2.erode(V, k)) & (P <= cv2.dilate(V, k)))
+        self.n = 0
 
     def update(self, frame_bgr):
-        lin = peat_rgb(frame_bgr)
-        B, G, R = lin[..., 0], lin[..., 1], lin[..., 2]
-        Y = 0.0722 * B + 0.7152 * G + 0.2126 * R
-        Rv = np.maximum(R - G - B, 0.0) * 320.0                # WCAG 적색값 (R−G−B)×320
-        self.sat = R >= PEAT_RED_SAT * (R + G + B + 1e-6)      # 포화 적색
-        first = self.prev_Y is None
-        ex_r = np.zeros(Y.shape, bool) if first else self._explained(Rv, self.prev_R)
-        self.prev_Y, self.prev_R = Y, Rv
-        return self.lum.update(peat_lum_cd(frame_bgr)), self.red.update(Rv, ex_r, self.sat)
+        LR, LG, LB = fpa_channels_cd(frame_bgr)
+        Y = (13933 * LR + 46871 * LG + 4732 * LB) >> 16                   # 1절
+        diff = LR - LG - LB
+        r9 = np.maximum(0, 3 * np.rint(1.6 * diff / 3)).astype(np.int64)   # 11절 9프레임 적색 신호
+        q3 = 3 * np.maximum(0, _trunc_div(410 * diff + 128, 768))          # 11절 전환용 적색 신호
+        sigma = (100 * LR) // (LR + LG + LB + 1)
+        sat = sigma > FPA_RED_SAT_PCT
+        self.sat = sat
+        self.sat_hist.append(sat)
+        if len(self.sat_hist) > FPA_HIST_FRAMES:
+            self.sat_hist.pop(0)
+
+        # 9프레임이 모이기 전에는 이력만 쌓고 분석하지 않는다. 첫 분석 프레임의 휘도 전환은
+        # 직전 휘도를 0으로 놓고 판정(원본 버퍼 초기값) — pointplay 0.6~1.2초 위험도가 PEAT와 일치.
+        self.n += 1
+        if self.n < FPA_HIST_FRAMES:
+            self.lum.push(Y)
+            self.red.push(r9)
+            self.prev = (Y, q3, sat)
+            return dict(_FPA_IDLE), dict(_FPA_IDLE)
+        Yp, qp, satp = self.prev
+        fl_l = _fpa_block_flag(Y, Yp, FPA_HIST_LUM)
+        fl_r = _fpa_block_flag(q3, qp, FPA_HIST_RED)
+        if self.n == FPA_HIST_FRAMES:
+            Yp = np.zeros_like(Y)
+        self.prev = (Y, q3, sat)
+        lum = self.lum.update(Y, Yp, fl_l, Y)
+        red = self.red.update(q3, qp, fl_r & (sat | satp), r9, np.any(self.sat_hist, axis=0))
+        return lum, red
+
+
+def _preview_signals(frame_bgr):
+    """원본 크기 프레임 → (휘도 cd, 적색 지표 cd, 포화 적색 마스크). 미리보기 강조용."""
+    LR, LG, LB = (_FPA_CD[frame_bgr[..., c]] for c in (2, 1, 0))
+    Y = (13933 * LR + 46871 * LG + 4732 * LB) >> 16
+    Rex = np.maximum(0.0, 1.6 * (LR - LG - LB))
+    sat = (100 * LR) // (LR + LG + LB + 1) > FPA_RED_SAT_PCT
+    return Y, Rex, sat
+
+
+def flash_mask(frame_bgr, prev_bgr):
+    """두 프레임 사이 휘도 변화 ≥20 cd/m²이고 어두운 쪽 <160 cd/m²인 픽셀 — 미리보기 강조용."""
+    (Y, _, _), (Yp, _, _) = _preview_signals(frame_bgr), _preview_signals(prev_bgr)
+    return (np.abs(Y - Yp) >= FPA_SWING_CD) & (np.minimum(Y, Yp) < FPA_DARK_CD)
+
+
+def red_mask(frame_bgr, prev_bgr):
+    """두 프레임 사이 적색 지표 변화 ≥20이고 어느 한쪽이 포화 적색인 픽셀 — 미리보기 강조용."""
+    (_, R, s), (_, Rp, sp) = _preview_signals(frame_bgr), _preview_signals(prev_bgr)
+    return (np.abs(R - Rp) >= FPA_SWING_CD) & (s | sp)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -358,7 +329,7 @@ def bgr_to_rgb01(img_bgr):
 
 def linearize_video(c):
     """영상 신호 → 선형 광량(BT.1886 감마 2.4, ITU-R BT.1702-3 Table 1). 줄무늬 패턴 전용 —
-    휘도·적색 판정은 PEAT 실측대로 sRGB(`peat_rgb`)를 쓴다."""
+    휘도·적색 판정은 fpaCore 수식대로 sRGB(`fpa_channels_cd`)를 쓴다."""
     return np.power(c, DISPLAY_GAMMA)
 
 
@@ -420,8 +391,10 @@ def detect_stripe_pattern(L_cd, moving):
 # ──────────────────────────────────────────────────────────────────────────
 def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
                   window_seconds=WINDOW_SECONDS, downsample=1, max_frames=0,
-                  enable_pattern=True, on_frame=None, should_stop=None):
+                  enable_pattern=True, on_frame=None, should_stop=None, engine="fpacore"):
     """비디오 전체를 분석하고 metrics(dict)를 반환한다. GUI/CLI 공용 단일 소스.
+
+    engine: "fpacore"(이 파일의 fpaCore 수식 엔진, 기본) 또는 "ex"(참조 코드 기반, engine_ex.py)
 
     on_frame(dict): 프레임 하나 처리할 때마다 호출 — 실시간 차트용
         (time/processed/total/lum_area/red_area/sat_area/lum_window_count/
@@ -447,10 +420,15 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
     pattern_flags = []         # 유해 줄무늬 패턴 프레임
     sat_area_series = []       # 포화 적색 존재 면적(전환 무관 — 적색 활동선용)
 
-    # 휘도·적색: PEAT식 픽셀 엔진
-    engine = PeatEngine(window_frames, effective_fps, area_threshold)
+    # 휘도·적색 엔진
+    if engine == "ex":
+        from engine_ex import ExEngine          # 참조 코드 기반 (선택 시에만 불러옴)
+        engine = ExEngine(effective_fps, area_threshold)
+    else:
+        engine = FpaCoreEngine(window_frames, area_threshold)
     lum_count, lum_fail_flags, lum_risk, lum_area_series = [], [], [], []
     red_count, red_fail_flags, red_risk, red_area_series = [], [], [], []
+    warn_flags = []            # 휘도·적색 경고(점수 0.1~0.4) 프레임
 
     prev_L_cd = None
 
@@ -477,6 +455,7 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
         for (cnt, fl, rk, ar), d in (((lum_count, lum_fail_flags, lum_risk, lum_area_series), lum),
                                      ((red_count, red_fail_flags, red_risk, red_area_series), red)):
             cnt.append(d["count"]); fl.append(d["fail"]); rk.append(d["risk"]); ar.append(d["area"])
+        warn_flags.append(lum["warn"] or red["warn"])
         sat_area_series.append(float(_box_area_map(engine.sat).max()))
 
         # ── 공간 패턴(줄무늬) ──
@@ -536,21 +515,14 @@ def analyze_video(video_path, area_threshold=AREA_THRESHOLD,
     pattern_min_frames = max(1, int(round(PATTERN_MIN_SECONDS * effective_fps)))
     pattern_fail = _has_run(pattern_arr, pattern_min_frames)
 
-    # 확장 플래시(Extended Flash): HardingFPA 설명서(How to interpret results Q19~21) —
-    # '실패 직전의 경고 수준' 플래시가 최근 5초의 80% 이상 지속되면 발생. 실제 FAIL 중에는
-    # 꺼지고, 진단선이 CAUTION 밴드 아래로 내려가도 꺼진다. 이전엔 FAIL 프레임까지 '활동'으로
-    # 쳐서 연속 FAIL 구간(Knox 0:15·1:40)마다 파란선이 떴지만 PEAT엔 없음.
-    # 경고 수준 = 3전환(≈2 flash) 이상: 2전환(1 flash)로 두면 일상적 장면 변화만으로도
-    # 5초 80%를 채워 Knox 0:39·1:42, Ballie 40~50초에 남음. QA 1차 PEAT는 전 영상 Extended 없음.
-    extended_frames = max(1, int(round(EXTENDED_SECONDS * effective_fps)))
-    onethird = max(1, FAIL_TRANSITIONS // 3)  # 실패(7전환)의 1/3 ≈ 2전환 = 1 flash
-    EXT_WARN_TRANSITIONS = FAIL_TRANSITIONS // 2  # 3
-    flash_fail = (lum_window >= FAIL_TRANSITIONS) | (red_window >= FAIL_TRANSITIONS)
-    flash_warn = ((lum_window >= EXT_WARN_TRANSITIONS) | (red_window >= EXT_WARN_TRANSITIONS)) & ~flash_fail
-    diag_caution = (lum_window_raw >= onethird) | (red_window_raw >= onethird)
-    extended_series = _rolling_mean(flash_warn.astype(np.float32), extended_frames)
-    extended_series = np.where(flash_fail | ~diag_caution, 0.0, extended_series).astype(np.float32)
+    # 확장 플래시(9절): 경고 프레임(둘 다 FAIL 아님)이 최근 5초 중 4초 초과 & 현재도 경고.
+    w = np.array(warn_flags, bool) & ~np.array(lum_fail_flags, bool) & ~np.array(red_fail_flags, bool)
+    M = max(1, int(round(EXTENDED_SECONDS * effective_fps)))
+    csum = np.concatenate([[0], np.cumsum(w)])
+    wsum = csum[1:] - csum[np.maximum(np.arange(len(w)) + 1 - M, 0)]
+    extended_series = np.where((wsum > 0.8 * M) & w, wsum / M, 0.0).astype(np.float32)
     extended_warn = bool((extended_series >= 0.8).any())
+    onethird = max(1, FAIL_TRANSITIONS // 3)  # 실패(7전환)의 1/3 ≈ 2전환 = 1 flash
 
     # ── 4단계 판정 (공식 PEAT 밴드: PASS / CAUTION(PASS) / CAUTION(FAIL) / FAIL) ──
     lum_max = int(lum_window.max()) if len(lum_window) else 0
@@ -609,17 +581,6 @@ def _has_run(flags, min_len):
         if run >= min_len:
             return True
     return False
-
-
-def _rolling_mean(x, win):
-    """각 인덱스에서 직전 win개(현재 포함) 값의 평균. 길이 보존.
-    윈도우가 채워지지 않은 초반 구간(i < win-1)은 0.0으로 처리하여
-    extended flash 초반 과대평가를 방지한다."""
-    out = np.zeros(len(x), dtype=np.float32)
-    if len(x) >= win:
-        csum = np.concatenate([[0.0], np.cumsum(x)])
-        out[win - 1:] = (csum[win:] - csum[:-win]) / win
-    return out
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -701,14 +662,16 @@ def plot_unified(metrics):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="PEAT 충실 재구현 (Harding/ITU-R BT.1702-3)")
+    ap = argparse.ArgumentParser(description="광과민성 발작 분석 (PEAT fpaCore 수식 재구현)")
     ap.add_argument("--video", required=True, help="입력 비디오 경로")
-    ap.add_argument("--area_threshold", type=float, default=AREA_THRESHOLD, help="10° 박스 플래시 면적 임계 (기본 0.25 초과)")
+    ap.add_argument("--area_threshold", type=float, default=AREA_THRESHOLD, help="판정 창 위험 면적 경계 (기본 0.25 = 25%%)")
     ap.add_argument("--window", type=float, default=WINDOW_SECONDS, help="슬라이딩 윈도우 초 (기본 1.0)")
     ap.add_argument("--downsample", type=int, default=1, help="N번째 프레임만 처리 (기본 1)")
     ap.add_argument("--max_frames", type=int, default=0, help="처리 프레임 제한 (0=무제한)")
     ap.add_argument("--no_pattern", action="store_true", help="줄무늬 패턴 분석 비활성화")
     ap.add_argument("--no_show", action="store_true", help="그래프 창 없이 요약만 출력")
+    ap.add_argument("--engine", choices=("fpacore", "ex"), default="fpacore",
+                    help="fpacore: fpaCore 수식 엔진(기본) / ex: 참조 코드(flash_analyzer_ex) 기반")
     args = ap.parse_args()
 
     if args.downsample > 1:
@@ -722,6 +685,7 @@ def main():
         downsample=args.downsample,
         max_frames=args.max_frames,
         enable_pattern=not args.no_pattern,
+        engine=args.engine,
     )
     print_summary(metrics)
     if not args.no_show:

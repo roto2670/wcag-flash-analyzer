@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QProgressBar, QGroupBox,
     QSpinBox, QDoubleSpinBox, QCheckBox, QStatusBar, QFrame,
-    QLineEdit,
+    QLineEdit, QComboBox,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QColor
@@ -53,10 +53,10 @@ class TimeAxisItem(pg.AxisItem):
     def tickStrings(self, values, scale, spacing):
         dec = 1 if spacing < 1 else 0
         return [fmt_mmss(v, dec) for v in values]
-from peat import (
+from engine import (
     FAIL_TRANSITIONS, CHART_YMAX, CHART_BANDS, CHART_PASS_LINE,
     count_to_chart_y, risk_to_chart_y,
-    peat_flash_mask, peat_red_mask,
+    flash_mask, red_mask,
 )
 
 
@@ -272,6 +272,13 @@ class PEATMainWindow(QMainWindow):
         self.chk_pattern.setChecked(True)
         opt_row.addWidget(self.chk_pattern)
 
+        opt_row.addWidget(QLabel("엔진:"))
+        self.combo_engine = QComboBox()
+        self.combo_engine.addItem("fpaCore 수식", "fpacore")
+        self.combo_engine.addItem("참조 코드 (ex)", "ex")
+        self.combo_engine.setToolTip("fpaCore 수식: engine.py (기본)\n참조 코드: flash_analyzer_ex.py 기반 — 몇 배 느림")
+        opt_row.addWidget(self.combo_engine)
+
         opt_row.addStretch()
 
         self.btn_export = QPushButton("💾  결과 내보내기")
@@ -314,7 +321,7 @@ class PEATMainWindow(QMainWindow):
         self.plot_widget.getViewBox().enableAutoRange(axis='xy', enable=False)
         self.plot_widget.setXRange(0, 1)
 
-        # 밴드 — 공식 PEAT 결과창 실측(peat.CHART_BANDS): PASS·FAIL은 밝게, CAUTION 두 칸은 어둡게
+        # 밴드 — 공식 PEAT 결과창 실측(engine.CHART_BANDS): PASS·FAIL은 밝게, CAUTION 두 칸은 어둡게
         lo = 0.0
         for hi, color, label in zip(CHART_BANDS, ["#c9ccd0", "#b3b7bb", "#b3b7bb"],
                                     ["PASS", "CAUTION (PASS)", "CAUTION (FAIL)"]):
@@ -543,6 +550,7 @@ class PEATMainWindow(QMainWindow):
             video_path=self.video_path,
             downsample=self.spin_downsample.value(),
             enable_pattern=self.chk_pattern.isChecked(),
+            engine=self.combo_engine.currentData(),
         )
         self.worker.progress.connect(self._on_progress)
         self.worker.frame_result.connect(self._on_frame_result)
@@ -577,7 +585,7 @@ class PEATMainWindow(QMainWindow):
         self.progress_bar.setValue(current)
 
     def _draw_band_curves(self, t, lum_act, red_act, lum_raw, red_raw, lum_risk=None, red_risk=None):
-        """곡선 갱신 — peat.py plot_unified와 같은 규칙(공식 PEAT 결과창 실측).
+        """곡선 갱신 — engine.py plot_unified와 같은 규칙(공식 PEAT 결과창 실측).
         점선 = 위험도 그대로, 실선 = 전환 수 × 0.5/7. 세로축은 위험도 0~3.5."""
         zero = np.zeros(len(t), dtype=np.float32)
         self.curve_lum_act.setData(t, risk_to_chart_y(zero if lum_risk is None else lum_risk))
@@ -618,7 +626,7 @@ class PEATMainWindow(QMainWindow):
         self._reset_buttons()
         verdict = summary["verdict"]
 
-        # ── 최종 차트: peat.py plot_unified와 완전 동일한 로직 ──
+        # ── 최종 차트: engine.py plot_unified와 완전 동일한 로직 ──
         if "times" in summary and len(summary["times"]) > 0:
             t = np.array(summary["times"])
             lum_window = np.array(summary["lum_window"], dtype=np.float32)
@@ -915,11 +923,9 @@ class PEATMainWindow(QMainWindow):
 
     @staticmethod
     def _violation_masks(frame, prev_frame):
-        """직전 프레임 대비 위반 픽셀 마스크 (휘도·적색 플래시, PEAT 기준).
-        분석은 극값 대비지만, 시각화는 프레임간 변화로도 위반 위치를 충분히 보여준다."""
-        lum_mask = peat_flash_mask(frame, prev_frame)
-        red_mask = peat_red_mask(frame, prev_frame)
-        return lum_mask, red_mask
+        """직전 프레임 대비 위반 픽셀 마스크 (휘도·적색 플래시, fpaCore 문턱).
+        분석은 9프레임 변동폭 기준이지만, 시각화는 프레임간 변화로도 위반 위치를 충분히 보여준다."""
+        return flash_mask(frame, prev_frame), red_mask(frame, prev_frame)
 
     def _show_frame_at_time(self, time_sec):
         """영상에서 특정 시간의 프레임을 추출하여 미리보기에 표시.
@@ -1170,6 +1176,14 @@ def main():
 
     window = PEATMainWindow()
     window.show()
+    # 명령줄에 영상 경로를 주면 드롭과 같이 바로 분석 시작
+    if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
+        path = os.path.abspath(sys.argv[1])
+        window.video_path = path
+        window.lbl_path.setText(os.path.basename(path))
+        window.lbl_path.setToolTip(path)
+        window.btn_start.setEnabled(True)
+        window._start_analysis()
     sys.exit(app.exec_())
 
 
