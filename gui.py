@@ -245,6 +245,7 @@ class PEATMainWindow(QMainWindow):
         self.input_url.setObjectName("urlInput")
         self.input_url.setPlaceholderText("YouTube URL을 붙여넣으세요...")
         self.input_url.setFixedHeight(36)
+        self.input_url.textEdited.connect(self._on_url_edited)
         url_row.addWidget(self.input_url, 1)
 
         self.btn_download = QPushButton("⬇  URL 분석")
@@ -457,11 +458,30 @@ class PEATMainWindow(QMainWindow):
             "Video Files (*.mp4 *.avi *.mov *.mkv *.webm *.wmv *.flv *.m4v *.mpg *.mpeg *.3gp *.ts);;All Files (*)"
         )
         if path:
-            self.video_path = path
-            self.lbl_path.setText(os.path.basename(path))
-            self.lbl_path.setToolTip(path)
-            self.btn_start.setEnabled(True)
+            self._set_local_video(path)
             self.statusBar().showMessage(f"선택됨: {path}")
+
+    def _set_local_video(self, path):
+        """로컬 영상 파일을 분석 대상으로 — URL 입력칸은 비운다 (2차 QA 기능 외 #8)."""
+        self.video_path = path
+        self.lbl_path.setText(os.path.basename(path))
+        self.lbl_path.setToolTip(path)
+        self.input_url.clear()
+        self.btn_start.setEnabled(True)
+
+    def _on_url_edited(self, text):
+        """URL을 입력하기 시작하면 이전 파일 표시를 지우고 분석 버튼을 끈다. 비우면 원래대로.
+        video_path는 그대로 둬서 이전 결과의 그래프 클릭·미리보기는 계속 동작한다."""
+        if text.strip():
+            self.lbl_path.setText("YouTube URL → [URL 분석]을 누르세요")
+            self.lbl_path.setToolTip("")
+            self.btn_start.setEnabled(False)
+        elif getattr(self, "video_path", None):
+            self.lbl_path.setText(os.path.basename(self.video_path))
+            self.lbl_path.setToolTip(self.video_path)
+            self.btn_start.setEnabled(True)
+        else:
+            self.lbl_path.setText("파일을 선택하거나 드래그하세요")
 
     # ──────────────────────────────────────────────────────────────────
     # YouTube 다운로드 후 분석
@@ -761,10 +781,7 @@ class PEATMainWindow(QMainWindow):
         if urls:
             path = urls[0].toLocalFile()
             if path:
-                self.video_path = path
-                self.lbl_path.setText(os.path.basename(path))
-                self.lbl_path.setToolTip(path)
-                self.btn_start.setEnabled(True)
+                self._set_local_video(path)
                 self.statusBar().showMessage(f"드롭됨: {path}")
                 # 자동 분석 시작
                 self._start_analysis()
@@ -1228,11 +1245,7 @@ def main():
     window.show()
     # 명령줄에 영상 경로를 주면 드롭과 같이 바로 분석 시작
     if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
-        path = os.path.abspath(sys.argv[1])
-        window.video_path = path
-        window.lbl_path.setText(os.path.basename(path))
-        window.lbl_path.setToolTip(path)
-        window.btn_start.setEnabled(True)
+        window._set_local_video(os.path.abspath(sys.argv[1]))
         window._start_analysis()
     sys.exit(app.exec_())
 
