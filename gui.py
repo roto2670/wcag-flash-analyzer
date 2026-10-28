@@ -886,6 +886,16 @@ class PEATMainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────
     # FAIL 구간 타임스탬프
     # ──────────────────────────────────────────────────────────────────
+    def _peak_time(self, start, end):
+        """구간 안에서 휘도·적색 위험도가 가장 높은 프레임의 시간 (동률이면 앞쪽).
+        PEAT 'jump to next defect'처럼 대표 프레임을 보여주기 위함 (2차 QA 결과 #1)."""
+        t = np.asarray(self.times)
+        risk = np.maximum(np.asarray(self.lum_risk, dtype=np.float32), np.asarray(self.red_risk, dtype=np.float32))
+        inside = np.flatnonzero((t >= start) & (t <= end))
+        if len(inside) == 0 or len(risk) != len(t):
+            return start
+        return float(t[inside[np.argmax(risk[inside])]])
+
     def _full_view(self):
         """그래프를 영상 전체 길이 × 위험도 축 전체로 되돌림."""
         if self.times:
@@ -1000,19 +1010,20 @@ class PEATMainWindow(QMainWindow):
     # FAIL 구간 클릭 → 해당 시간 프레임 표시 + 차트 이동
     # ──────────────────────────────────────────────────────────────────
     def _on_fail_segment_click(self, link):
-        """FAIL 구간 링크 클릭 시 구간 강조 + 해당 시간의 프레임 표시 + 차트에 수직선"""
+        """구간 링크 클릭 시 구간 강조 + 구간 안 위험도 최고 프레임으로 수직선·미리보기 이동"""
         if not link.startswith("seg:"):
             return
         idx = int(link[4:])
         self._select_fail_segment(idx)
-        time_sec = self.fail_segs[idx][0]
+        seg_start, seg_end, _ = self.fail_segs[idx]
+        time_sec = self._peak_time(seg_start, seg_end)
 
         # 수직선 표시
         self.vline.setPos(time_sec)
         self.vline.setVisible(True)
 
-        # 차트를 해당 구간으로 이동 (전후 2초 범위)
-        self.plot_widget.setXRange(max(0, time_sec - 2), time_sec + 5, padding=0)
+        # 차트를 해당 구간으로 이동 (구간 앞뒤 2초, 최소 7초 폭)
+        self.plot_widget.setXRange(max(0, seg_start - 2), max(seg_end + 2, seg_start + 5), padding=0)
 
         # 프레임 미리보기
         self._show_frame_at_time(time_sec)
