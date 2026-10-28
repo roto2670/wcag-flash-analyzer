@@ -359,6 +359,19 @@ class PEATMainWindow(QMainWindow):
         self.curve_extended = self.plot_widget.plot(
             pen=pg.mkPen(color="#89b4fa", width=2), name="Extended Flash")
 
+        # 줌 리셋: pyqtgraph의 'A' 버튼은 마우스를 올려야 보이고 뜻이 안 전해져서 숨기고,
+        # 항상 보이는 [전체 보기] 버튼을 그래프 위에 둔다 (2차 QA 기능 외 #10)
+        self.plot_widget.getPlotItem().hideButtons()
+        chart_bar = QHBoxLayout()
+        chart_bar.addStretch()
+        self.btn_full_view = QPushButton("🔍  전체 보기")
+        self.btn_full_view.setObjectName("exportBtn")
+        self.btn_full_view.setFixedHeight(26)
+        self.btn_full_view.setToolTip("확대·이동한 그래프를 영상 전체 범위로 되돌립니다")
+        self.btn_full_view.setEnabled(False)
+        self.btn_full_view.clicked.connect(self._full_view)
+        chart_bar.addWidget(self.btn_full_view)
+        chart_inner.addLayout(chart_bar)
         chart_inner.addWidget(self.plot_widget)
 
         # 차트 클릭 시그널
@@ -571,6 +584,7 @@ class PEATMainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.fail_segs, self.fail_selected = [], None
         self.lbl_fail_segments.setText("")
+        self.btn_full_view.setEnabled(False)
         self.sel_region.setVisible(False)
 
         # 분석 중에는 차트 조작 비활성화
@@ -736,6 +750,7 @@ class PEATMainWindow(QMainWindow):
 
         # 내보내기 버튼 활성화
         self.btn_export.setEnabled(True)
+        self.btn_full_view.setEnabled(True)
 
         self.worker = None
 
@@ -861,6 +876,12 @@ class PEATMainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────
     # FAIL 구간 타임스탬프
     # ──────────────────────────────────────────────────────────────────
+    def _full_view(self):
+        """그래프를 영상 전체 길이 × 위험도 축 전체로 되돌림."""
+        if self.times:
+            self.plot_widget.setXRange(0, self.times[-1] + 0.5, padding=0)
+        self.plot_widget.setYRange(0, CHART_YMAX, padding=0)
+
     def _get_fail_timestamps(self, times, lum_counts, red_counts):
         """FAIL 임계값을 넘는 구간의 시작~끝 타임스탬프 리스트 반환"""
         threshold = FAIL_TRANSITIONS
