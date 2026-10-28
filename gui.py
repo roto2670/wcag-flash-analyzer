@@ -365,6 +365,15 @@ class PEATMainWindow(QMainWindow):
         self.vline = pg.InfiniteLine(angle=90, pen=pg.mkPen(color="#FFEB3B", width=3))
         self.vline.setVisible(False)
         self.plot_widget.addItem(self.vline)
+        # 선택한 FAIL 구간 띠 (2차 QA 기능 외 #4)
+        self.sel_region = pg.LinearRegionItem(values=(0, 0), orientation="vertical", movable=False,
+                                              brush=pg.mkBrush(255, 235, 59, 70))
+        for ln in self.sel_region.lines:
+            ln.setPen(pg.mkPen(None))
+        self.sel_region.setZValue(-3)
+        self.sel_region.setVisible(False)
+        self.plot_widget.addItem(self.sel_region)
+        self.fail_segs, self.fail_kind, self.fail_selected = [], "FAIL", None
 
         center_layout.addWidget(chart_frame, 3)
 
@@ -540,6 +549,9 @@ class PEATMainWindow(QMainWindow):
         self.lbl_verdict.setStyleSheet(STYLE_IDLE)
         self.lbl_details.setText("")
         self.progress_bar.setValue(0)
+        self.fail_segs, self.fail_selected = [], None
+        self.lbl_fail_segments.setText("")
+        self.sel_region.setVisible(False)
 
         # 분석 중에는 차트 조작 비활성화
         self.plot_widget.setMouseEnabled(x=False, y=False)
@@ -698,8 +710,8 @@ class PEATMainWindow(QMainWindow):
         t = np.array(self.times)
         lum_counts = np.array(self.lum_window_counts, dtype=np.float32)
         red_counts = np.array(self.red_window_counts, dtype=np.float32)
-        fail_text = self._get_fail_timestamps_text(t, lum_counts, red_counts)
-        self.lbl_fail_segments.setText(fail_text)
+        self.fail_segs, self.fail_kind = self._get_risk_segments(t, lum_counts, red_counts)
+        self._select_fail_segment(None)
         self.fail_scroll.verticalScrollBar().setValue(0)   # 새 결과는 맨 위부터
 
         # 내보내기 버튼 활성화
@@ -851,48 +863,63 @@ class PEATMainWindow(QMainWindow):
 
         return segments
 
-    def _get_fail_timestamps_text(self, times, lum_counts, red_counts):
-        """FAIL 구간을 클릭 가능한 HTML 링크로 포맷"""
+    def _get_risk_segments(self, times, lum_counts, red_counts):
+        """(구간 리스트, 종류). FAIL 구간이 없으면 CAUTION 구간(전환 6회 이상)을 대신 돌려준다."""
         segments = self._get_fail_timestamps(times, lum_counts, red_counts)
+        if segments:
+            return segments, "FAIL"
+        in_caution = np.maximum(lum_counts, red_counts) >= FAIL_TRANSITIONS - 1
+        segs, start = [], None
+        for i, flag in enumerate(in_caution):
+            if flag and start is None:
+                start = times[i]
+            elif not flag and start is not None:
+                segs.append((start, times[i - 1]))
+                start = None
+        if start is not None:
+            segs.append((start, times[-1]))
+        return segs, "CAUTION"
+
+    def _fail_list_html(self, segments, kind, selected=None):
+        """구간 목록 HTML — 제목에 개수, 항목마다 번호, 선택한 구간은 배경 강조."""
         if not segments:
-            # CAUTION 구간도 표시
-            caution_thresh = FAIL_TRANSITIONS - 1
-            combined = np.maximum(lum_counts, red_counts)
-            in_caution = combined >= caution_thresh
-            caution_segs = []
-            start = None
-            for i, flag in enumerate(in_caution):
-                if flag and start is None:
-                    start = times[i]
-                elif not flag and start is not None:
-                    caution_segs.append((start, times[i - 1]))
-                    start = None
-            if start is not None:
-                caution_segs.append((start, times[-1]))
-
-            if caution_segs:
-                lines = ["<b>⚠️ CAUTION 구간:</b><br>"]
-                for s, e in caution_segs:
-                    lines.append(f'<a href="time:{s:.2f}" style="color:#e0af68; text-decoration:none;">▶ {fmt_mmss(s, 2)} ~ {fmt_mmss(e, 2)}</a><br>')
-                return "".join(lines)
             return "위험 구간 없음"
-
-        lines = ["<b>🚨 FAIL 구간:</b><br>"]
-        for s, e in segments:
-            lines.append(f'<a href="time:{s:.2f}" style="color:#f7768e; text-decoration:none;">▶ {fmt_mmss(s, 2)} ~ {fmt_mmss(e, 2)}</a><br>')
+        icon, color = ("🚨", "#f7768e") if kind == "FAIL" else ("⚠️", "#e0af68")
+        lines = [f"<b>{icon} {kind} 구간 ({len(segments)}개):</b><br>"]
+        for i, (s, e) in enumerate(segments):
+            text = f"#{i + 1} ▶ {fmt_mmss(s, 2)} ~ {fmt_mmss(e, 2)}"
+            if i == selected:
+                text = f'<span style="background-color:{color}; color:#1a1b26;">&nbsp;{text}&nbsp;</span>'
+            lines.append(f'<a href="seg:{i}" style="color:{color}; text-decoration:none;">{text}</a><br>')
         return "".join(lines)
+
+    def _get_fail_timestamps_text(self, times, lum_counts, red_counts):
+        """FAIL(없으면 CAUTION) 구간 목록 HTML — PDF 내보내기용"""
+        return self._fail_list_html(*self._get_risk_segments(times, lum_counts, red_counts))
+
+    def _select_fail_segment(self, idx):
+        """구간 선택 상태를 목록 강조와 그래프 띠에 반영 (None이면 선택 해제)."""
+        self.fail_selected = idx
+        bar = self.fail_scroll.verticalScrollBar()
+        pos = bar.value()                       # 다시 그려도 스크롤 위치 유지
+        self.lbl_fail_segments.setText(self._fail_list_html(self.fail_segs, self.fail_kind, idx))
+        bar.setValue(pos)
+        if idx is None:
+            self.sel_region.setVisible(False)
+        else:
+            self.sel_region.setRegion(self.fail_segs[idx])
+            self.sel_region.setVisible(True)
 
     # ──────────────────────────────────────────────────────────────────
     # FAIL 구간 클릭 → 해당 시간 프레임 표시 + 차트 이동
     # ──────────────────────────────────────────────────────────────────
     def _on_fail_segment_click(self, link):
-        """FAIL 구간 링크 클릭 시 해당 시간의 프레임 표시 + 차트에 수직선"""
-        if not link.startswith("time:"):
+        """FAIL 구간 링크 클릭 시 구간 강조 + 해당 시간의 프레임 표시 + 차트에 수직선"""
+        if not link.startswith("seg:"):
             return
-        try:
-            time_sec = float(link.replace("time:", ""))
-        except ValueError:
-            return
+        idx = int(link[4:])
+        self._select_fail_segment(idx)
+        time_sec = self.fail_segs[idx][0]
 
         # 수직선 표시
         self.vline.setPos(time_sec)
@@ -926,6 +953,12 @@ class PEATMainWindow(QMainWindow):
         # 수직선 표시
         self.vline.setPos(click_time)
         self.vline.setVisible(True)
+
+        # 클릭한 시간이 든 구간을 선택 (밖이면 해제)
+        if self.fail_segs:
+            hit = next((i for i, (s, e) in enumerate(self.fail_segs) if s <= click_time <= e), None)
+            if hit != self.fail_selected:
+                self._select_fail_segment(hit)
 
         # 해당 시간의 프레임 추출
         self._show_frame_at_time(click_time)
